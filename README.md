@@ -1,43 +1,25 @@
-# base44-migrate
+# Skills
 
-An [Agent Skill](https://agentskills.io) that migrates a [Base44](https://base44.com) app to [Vercel](https://vercel.com) + [Supabase](https://supabase.com).
+A collection of [Agent Skills](https://agentskills.io) — portable, version-controlled packages that extend AI agents with specialized capabilities.
 
-## What it does
+Compatible with Claude Code, Cursor, GitHub Copilot, VS Code, OpenAI Codex, and any other [Agent Skills-compatible](https://agentskills.io) tool.
 
-Scans your Base44 project, generates a customized migration plan, and implements all the changes — rewriting auth, entities, backend functions, DB schema, and deployment config.
+## Available Skills
 
-## Compatible tools
+| Skill | Description |
+|---|---|
+| [base44-migrate](./base44-migrate) | Migrate a Base44 app to Vercel + Supabase |
 
-Works in any [Agent Skills-compatible](https://agentskills.io) tool: Claude Code, Cursor, GitHub Copilot, VS Code, OpenAI Codex, and more.
-
-## Install
+## Install a skill
 
 **Claude Code:**
 ```bash
-git clone https://github.com/liorarieli-maker/Skills.git /tmp/Skills
-cp -r /tmp/Skills/base44-migrate ~/.claude/skills/
+git clone https://github.com/liorarieli-maker/Skills.git /tmp/liorar-skills
+cp -r /tmp/liorar-skills/<skill-name> ~/.claude/skills/
 ```
 
 **Cursor:**
 ```bash
-git clone https://github.com/liorarieli-maker/Skills.git /tmp/Skills
-cp -r /tmp/Skills/base44-migrate ~/.cursor/skills/
+git clone https://github.com/liorarieli-maker/Skills.git /tmp/liorar-skills
+cp -r /tmp/liorar-skills/<skill-name> ~/.cursor/skills/
 ```
-
-## Usage
-
-In your agent's chat, type:
-```
-/base44-migrate
-```
-
-## What gets migrated
-
-| From (Base44) | To |
-|---|---|
-| `base44.auth.*` | Supabase Auth + Google OAuth |
-| `base44.entities.*` | Supabase PostgreSQL + RLS |
-| `/functions/*.ts` | Vercel serverless functions or Supabase Edge Functions |
-| Base44 hosting | Vercel CDN |
-
-See [reference.md](./reference.md) for the full translation table.
