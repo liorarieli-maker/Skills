@@ -16,7 +16,7 @@ First, explain to the user:
 
 > "We're going to migrate your Base44 app to run on Vercel (hosting + serverless functions) and Supabase (database + auth). This creates a brand new codebase — your Base44 app stays untouched.
 >
-> **Step 1:** In Base44, open your app → Settings → Export → Download ZIP.
+> **Step 1:** In Base44, open your app → click the **more actions menu** (upper-right corner) → **Export project as ZIP**.
 > Extract the ZIP to a folder on your Mac (e.g. `~/Downloads/my-app`).
 > Then paste the folder path here."
 
@@ -31,12 +31,17 @@ Once you have the folder path:
 1. Read `package.json` → confirm `@base44/sdk` or `@base44/vite-plugin` is present.
 2. Recursively search all `.js`, `.jsx`, `.ts`, `.tsx` files for:
    - `base44.entities.` → **flag: needs DB** (note which entity names appear)
-   - `base44.auth.` → **flag: needs Auth**
+   - `base44.auth.` → **flag: needs Auth — but read the actual usage context before flagging**
    - `base44.functions.invoke(` → **flag: needs backend functions** (note which function names)
    - `Core.InvokeLLM(` or `openai` → **flag: needs OpenAI**
    - `paypal` or `PayPal` → **flag: needs PayPal**
    - Any other third-party API calls
-3. Read all files in `/functions/` if present → note what each function does, estimate if any run >10 seconds.
+3. **For any `base44.auth.` usage found**, read the actual files and check:
+   - Is the app set to "Public (no login)" in Base44? (Check if `AuthContext` only checks auth when a token is already present, and the app renders without requiring login.)
+   - Is `base44.auth.me()` only used to detect an admin/owner for dev-tool UI (e.g. showing an "Admin Note" on 404 pages)?
+   - If YES to either: **do NOT flag as needing Auth**. The auth usage is Base44 internal tooling, not real user auth. Simply remove it during migration.
+   - Only flag **needs Auth** if the app actually gates content or routes behind a login wall for end users.
+4. Read all files in `/functions/` if present → note what each function does, estimate if any run >10 seconds.
 
 Based on findings, build the prerequisites list. Only include what's actually needed.
 
@@ -46,7 +51,7 @@ Based on findings, build the prerequisites list. Only include what's actually ne
 - Vercel account
 - Vercel CLI (`vercel`)
 
-**Only if DB or Auth detected:**
+**Only if DB or real user Auth detected:**
 - Supabase account
 - Supabase CLI (`supabase`)
 
@@ -59,32 +64,29 @@ Present the prerequisites list to the user:
 
 Go through each prerequisite one by one:
 
-### GitHub Account
-Ask: "Do you have a GitHub account? If not, go to github.com/signup — it's free. Type 'done' when ready."
-Wait for confirmation.
-
-### `gh` CLI
+### `gh` CLI + GitHub Account
 Run: `gh --version`
 - If missing: print `brew install gh` (macOS) or https://cli.github.com for other OS. Wait, then re-check.
-- Then run: `gh auth login` and guide through the interactive flow.
 
-### Vercel Account
-Ask: "Go to vercel.com and sign up with GitHub — free tier is enough. Type 'done' when ready."
-Wait for confirmation.
+Run: `gh auth status`
+- If already authenticated: GitHub account is confirmed — skip asking about it.
+- If not authenticated: Ask "Do you have a GitHub account? If not, go to github.com/signup — it's free. Type 'done' when ready." Then run `gh auth login` and guide through the interactive flow.
 
-### Vercel CLI
+### Vercel CLI + Vercel Account
 Run: `vercel --version`
 - If missing: run `npm install -g vercel`. Wait, then re-check.
-- Then run: `vercel login` and guide through.
 
-### Supabase Account *(only if DB or Auth detected)*
-Ask: "Go to supabase.com and sign up — free tier is enough. Type 'done' when ready."
-Wait for confirmation.
+Run: `vercel whoami`
+- If already authenticated: Vercel account is confirmed — skip asking about it.
+- If not authenticated: Ask "Do you have a Vercel account? If not, go to vercel.com and sign up with GitHub — free tier is enough. Type 'done' when ready." Then run `vercel login` and guide through.
 
-### Supabase CLI *(only if DB or Auth detected)*
+### Supabase CLI + Supabase Account *(only if DB or Auth detected)*
 Run: `supabase --version`
 - If missing: run `brew install supabase/tap/supabase`. Wait, then re-check.
-- Then run: `supabase login` and guide through.
+
+Run: `supabase projects list`
+- If already authenticated: Supabase account is confirmed — skip asking about it.
+- If not authenticated: Ask "Do you have a Supabase account? If not, go to supabase.com and sign up — free tier is enough. Type 'done' when ready." Then run `supabase login` and guide through.
 
 Once all confirmed: "Great! All prerequisites are set up. Let's start the migration."
 
