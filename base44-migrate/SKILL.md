@@ -2,6 +2,7 @@
 name: base44-migrate
 description: Migrate a Base44 app to Vercel (frontend + serverless functions) and Supabase (PostgreSQL + Auth). Scans the repo, generates a customized migration plan, and implements all changes.
 argument-hint: "[path-to-extracted-base44-zip-or-leave-blank-to-use-current-dir]"
+disable-model-invocation: true
 ---
 
 # Base44 → Vercel + Supabase Migration Skill
