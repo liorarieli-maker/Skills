@@ -9,6 +9,8 @@ Compatible with Claude Code, Cursor, GitHub Copilot, VS Code, OpenAI Codex, and 
 | Skill | Description |
 |---|---|
 | [base44-migrate](./base44-migrate) | Migrate a Base44 app to Vercel + Supabase |
+| [cost-inspector](./cost-inspector) | Find where your Claude Code money is going, and fix the safe parts. Never reads your conversations |
+| [cost-coach](./cost-coach) | Read a few of your past conversations and point out the habits that cost money, with real examples |
 
 ## Install a skill
 
