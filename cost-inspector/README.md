@@ -2,10 +2,13 @@
 
 **Finds out where your Claude Code money is going, and fixes the safe parts.**
 
-Claude Code never tells you what a session cost. This skill looks at how your
-setup is configured and how you have been using it, then hands you a list of
-what is wasting money — with a dollar figure on each item and a plain
-explanation of why it costs anything.
+Claude Code can tell you what you spent — `/usage` gives you the number. What it
+does not tell you is *why*: which settings and which habits produced that
+number, and which of them are worth changing.
+
+This skill looks at how your setup is configured and how you have been using it,
+then hands you a list of what is wasting money — with a dollar figure on each
+item and a plain explanation of why it costs anything.
 
 It runs 16 checks. Things like:
 
