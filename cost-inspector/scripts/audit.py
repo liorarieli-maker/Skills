@@ -1052,7 +1052,15 @@ def check_models(h, settings, sources):
                    "first message of a session, and stays quiet unless the task "
                    "clearly does not need what you are paying for: "
                    f'`python3 "{SELF_PATH}" --install-hook` '
-                   "(undo it with --remove-hook)."),
+                   "(undo it with --remove-hook). "
+                   "One thing to know either way: switching model throws away "
+                   "the saved copy of your conversation, because that copy only "
+                   "works for the model it was made for. Everything said so far "
+                   "then gets re-sent at full price once. At your first message "
+                   "that is small change; fifty messages in it is several times "
+                   "worse. So switch at the start of a session, and if you find "
+                   "yourself switching often, change the default instead - "
+                   "starting on the cheaper model costs nothing at all."),
             can_fix="ASSISTED", doc=DOCS["model"], monthly_usd=half,
             payload={"model_setting": model_setting,
                      "upper_bound_usd": round(exp_cost - alt, 2),
