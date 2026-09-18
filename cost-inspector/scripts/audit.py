@@ -761,13 +761,11 @@ def check_skills(skills, h, window_days, wmult, enabled_plugins):
             "A4", "Skills you never use", "FIX",
             evidence=f"{len(stale)} skills you have not used in {window_days} days: "
                      + ", ".join(s["name"] for s in stale[:8]),
-            why="A skill is a saved set of instructions for one kind of task. So "
-                "that Claude can choose a skill on its own, it keeps a list of "
-                "every skill's name and description in front of it at all times - "
-                "and you pay for that list on every message, including the skills "
-                "you never use. Adding one line to a skill takes it off the list "
-                "but keeps it working: you can still start it yourself by typing "
-                "a slash and its name.",
+            why="So Claude can pick a skill on its own, it keeps every skill's "
+                "name and description in front of it on every message - "
+                "including the ones you never use. One line takes a skill off "
+                "that list without removing it: you can still run it by typing a "
+                "slash and its name.",
             fix="Add the line 'disable-model-invocation: true' at the top of each "
                 "unused skill's file. Nothing is deleted, and you can still run "
                 "each one by name.",
@@ -906,13 +904,12 @@ def check_memory(cwd, h, wmult):
         "A7", "Memory notes too long", "FIX",
         evidence=f"{len(problems)} of your {indexes} project memory lists need tidying - "
                  + "; ".join(problems[:4]),
-        why="MEMORY.md is the contents page for the things Claude remembers "
-            "about a project, and it loads on every message in that project. It "
-            "is meant to hold one short line per memory - the actual details "
-            "belong in the separate memory files, which load only when they are "
-            "relevant. Long lines here cost you all day. Two other traps: a "
-            "memory file missing from this list never gets used at all, and if "
-            "the list gets very long the end of it is quietly cut off.",
+        why="MEMORY.md is the contents page of what Claude remembers about a "
+            "project, and it loads on every message there. It should be one "
+            "short line per memory - the detail belongs in the files it links "
+            "to, which load only when relevant. Two traps: a memory file missing "
+            "from the list is never used at all, and a very long list gets cut "
+            "off at the end.",
         fix="Shorten each line to one sentence and move the detail into the file "
             "it links to. Add any memory file that is missing from the list, and "
             "remove links pointing at files that no longer exist.",
@@ -981,17 +978,13 @@ def check_mcp(configured, h, window_days=30, wmult=WRITE_MULT_1H):
                  + ", ".join(unused[:8])
                  + (f" (~{fmt_tok(est['tokens'])} tokens per message est.)" if est else ""),
         why="An MCP server is an outside service you connect to Claude, like "
-            "Gmail or Jira. The full instructions for its tools now load only "
-            "when Claude actually needs them, so an unused server is much cheaper "
-            "than it used to be - but the tool names still sit in the list Claude "
-            "carries on every message. Anthropic does not publish what that "
-            "costs, so the figure here is our own estimate, worked out from the "
-            "servers you do use"
-            + (f" ({est['tools_per_server']} tools each and "
-               f"{est['chars_per_name']} characters per name, on average). "
-               "Treat it as a floor: we can only see the tools you actually "
-               "called, so the real number is a little higher."
-               if est else "."),
+            "Gmail or Jira. Its tool instructions only load when needed now, but "
+            "the tool names still sit in the list Claude carries on every "
+            "message. Anthropic does not publish that cost, so this is our own "
+            "estimate from the servers you do use"
+            + (f" ({est['tools_per_server']} tools each, "
+               f"{est['chars_per_name']} characters per name) - a floor, not a "
+               "measurement." if est else "."),
         fix=fix, can_fix="MANUAL", doc=DOCS["mcp"],
         tokens_per_turn=est["tokens"] if est else 0,
         monthly_usd=(overhead_monthly_usd(est["tokens"], h, wmult) if est else 0.0),
@@ -1036,21 +1029,13 @@ def check_models(h, settings, sources):
             evidence=f"{share*100:.0f}% of your messages went to an expensive model, costing "
                      f"{money(exp_cost)} of {money(sum(costs.values()))} in this period"
                      + (f"; model={model_setting}{where}" if model_setting else ""),
-            why="Claude Code picks the model once, when the session starts, and "
-                "keeps it for the whole session. It does not switch to a cheaper "
-                "one by itself for easy questions. So if your default is the "
-                "most expensive model, you also pay that rate for 'rename this "
-                "variable'. Priced at Sonnet's rates instead, the exact same work "
-                "would have cost " + money(alt) + ". Read that as a best case: it "
-                "assumes Sonnet would have finished every one of those tasks.\n\n"
-                "Switch at the *start* of a session, not halfway through. "
-                "Changing model throws away the saved copy of your conversation, "
-                "because that copy only works for the model it was made for, so "
-                "everything said so far gets re-sent at full price once. On your "
-                "first message that is small change; fifty messages in it is "
-                "several times worse. If you find yourself switching often, "
-                "change the default instead - starting on the cheaper model "
-                "costs nothing at all.",
+            why="Claude Code fixes the model when a session starts and never "
+                "switches by itself, so your priciest model also handles 'rename "
+                "this variable'. The same work at Sonnet's rates would have cost "
+                + money(alt) + " - a best case, since it assumes Sonnet could "
+                "have finished it. Switch at the start of a session, not "
+                "mid-way: changing model discards the cached conversation, so "
+                "all of it gets re-sent once at full price.",
             fix=("Type /model sonnet at the start of a session you know is easy"
                  + (", or change your default `model` setting. "
                     if model_setting else ". ")
@@ -1109,15 +1094,13 @@ def check_models(h, settings, sources):
             "B3", "Thinking effort set to high", "FIX",
             evidence=f"effort is set to '{effort}' for every session"
                      + f" (in your {sources.get('effortLevel','?')} settings)",
-            why="Effort is how long Claude thinks before it answers. More "
-                "thinking means more text produced, and you pay for that text. "
-                "Like the model, it is set once per session and does not adapt "
-                "per question, so a high default applies to simple jobs too. The "
-                "good news: dropping effort usually costs you less quality than "
-                "dropping to a weaker model, so try this lever first. The figure "
-                "shown assumes you cut thinking by 30% on your routine work. "
-                "Thinking and answers cost you " + money(out_cost) + " in this "
-                "period, which is the most this change could ever save.",
+            why="Effort is how long Claude thinks before answering, and you pay "
+                "for that thinking. It is set once per session, so a high "
+                "default applies to simple jobs too. Dropping effort usually "
+                "costs less quality than dropping to a weaker model, so try it "
+                "first. The figure assumes a 30% cut on routine work; thinking "
+                "and answers cost " + money(out_cost) + " in total here, which "
+                "is the ceiling.",
             fix="Set your default effort to medium, and raise it for the "
                 "occasional hard task that needs it.",
             can_fix="ASSISTED", doc=DOCS["settings"],
@@ -1160,13 +1143,11 @@ def check_cache(h, settings):
         "C1", "Paying twice for the same text", "FIX",
         evidence=f"{rate*100:.1f}% cache hits ({fmt_tok(reads)} read vs "
                  f"{fmt_tok(writes)} written, {fmt_tok(fresh)} uncached)",
-        why="Claude keeps a copy of the conversation so far and re-uses it, at "
-            "about a tenth of the normal price. That is the cache, and it is why "
-            "long sessions are not as expensive as they look. When it misses, "
-            "you pay full price again for text you already paid for. The usual "
-            "cause is changing CLAUDE.md or your settings in the middle of a "
-            "session, which throws the saved copy away. One warning: making your "
-            "context smaller in a way that breaks this can cost more, not less.",
+        why="Claude re-uses the conversation so far at about a tenth of the "
+            "normal price - that is the cache. When it misses you pay full price "
+            "again for text you already paid for, usually because CLAUDE.md or "
+            "your settings changed mid-session. One warning: shrinking your "
+            "context in a way that breaks the cache can cost more, not less.",
         fix="Try not to edit CLAUDE.md or your settings mid-session - finish the "
             "session first. Put the things that do not change at the start of "
             "the conversation.",
@@ -1540,11 +1521,14 @@ def render_markdown(findings, h, version, window_days, warnings, cal, ref):
 
     out = ["# Cost Inspector report", ""]
 
-    # Bottom line, then everything else folded away. The previous version put
-    # ~7.7k characters of reasoning on screen at once and got read as a wall of
-    # text, which is the one way a report like this fails: nobody acts on it.
-    # <details> is plain HTML and every common markdown viewer renders it as a
-    # real collapsible block; the ones that do not still show the content.
+    # Bottom line first, then short sections. An earlier version put ~7.7k
+    # characters of reasoning on screen at once and read as a wall of text,
+    # which is the one way a report like this fails: nobody acts on it.
+    #
+    # Collapsing it behind <details> was tried and reverted: the Claude Code
+    # desktop app's markdown renderer does not process inline HTML, so readers
+    # there saw literal "<details>" tags. Anything relying on an HTML-capable
+    # viewer is off the table - brevity has to come from writing less.
     if identified:
         pct = (identified / total * 100) if total else 0
         out.append(f"## You could save about {money(identified)} a month")
@@ -1589,8 +1573,6 @@ def render_markdown(findings, h, version, window_days, warnings, cal, ref):
             out.append(_apply_cmd(",".join(auto)))
             out.append("```")
             out.append("")
-        out.append("Each finding below opens up to show why it costs money.")
-        out.append("")
 
         for f in sorted(fixes, key=lambda x: -x.monthly_usd):
             bits = []
@@ -1607,6 +1589,8 @@ def render_markdown(findings, h, version, window_days, warnings, cal, ref):
             out.append("")
             out.append(f"{f.evidence}")
             out.append("")
+            out.append(f.why)
+            out.append("")
             out.append(f"**Do this:** {f.fix}")
             out.append("")
             if f.can_fix == "AUTO":
@@ -1614,22 +1598,14 @@ def render_markdown(findings, h, version, window_days, warnings, cal, ref):
                 out.append(_apply_cmd(f.id))
                 out.append("```")
                 out.append("")
-            out.append("<details>")
-            out.append("<summary>Why this costs money</summary>")
-            out.append("")
-            out.append(f.why)
             if f.doc:
+                out.append(f"[More on this]({f.doc})")
                 out.append("")
-                out.append(f"[Official docs]({f.doc})")
-            out.append("")
-            out.append("</details>")
-            out.append("")
 
     out.append("## Everything else")
     out.append("")
 
-    out.append("<details>")
-    out.append(f"<summary>{len(passes)} checks passed — nothing to do</summary>")
+    out.append(f"### {len(passes)} checks passed — nothing to do")
     out.append("")
     out.append("| | Check | What we saw |")
     out.append("|---|---|---|")
@@ -1639,12 +1615,9 @@ def render_markdown(findings, h, version, window_days, warnings, cal, ref):
         out.append(f"| {STATUS_LABEL.get(f.status, f.status)} | {f.title} "
                    f"| {f.evidence} |")
     out.append("")
-    out.append("</details>")
-    out.append("")
 
-    out.append("<details>")
-    out.append(f"<summary>Your numbers — {len(h.sessions)} sessions over "
-               f"{window_days} days</summary>")
+    out.append(f"### Your numbers — {len(h.sessions)} sessions over "
+               f"{window_days} days")
     out.append("")
     out.append("| | | |")
     out.append("|---|---|---|")
@@ -1678,11 +1651,8 @@ def render_markdown(findings, h, version, window_days, warnings, cal, ref):
     out.append(f"Run {dt.datetime.now().strftime('%d %b %Y at %H:%M')} on Claude "
                f"Code {version or 'unknown'}.")
     out.append("")
-    out.append("</details>")
-    out.append("")
 
-    out.append("<details>")
-    out.append("<summary>Want a deeper look at how you work?</summary>")
+    out.append("### Want a deeper look at how you work?")
     out.append("")
     if ref.get("recommended"):
         out.append("Everything above came from settings and totals. It cannot "
@@ -1698,8 +1668,6 @@ def render_markdown(findings, h, version, window_days, warnings, cal, ref):
                    "actual conversations and comments on how you work. Your "
                    "sessions already look efficient, so it probably would not "
                    "tell you enough to be worth what it costs.")
-    out.append("")
-    out.append("</details>")
     out.append("")
     out.append("---")
     out.append("")
