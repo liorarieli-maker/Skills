@@ -55,6 +55,11 @@ Saves markdown to `~/.claude/cost-coach/last-review.md` (`--out` to relocate,
 `--print` to also print it). The file is written `0600` because it quotes the
 user's own work.
 
+**The user cannot see your tool output.** It is collapsed behind a "Ran N
+commands" toggle, so running `report.py` shows them nothing. Never say "the
+report is above" — it is not. End the run with the summary table pasted into
+your reply, and the path `~/.claude/cost-coach/last-review.md` on its own line.
+
 ## The consent gate — do this before stage 2, every time
 
 Say all four of these in plain words. The user is agreeing to something real,

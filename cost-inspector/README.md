@@ -2,9 +2,12 @@
 
 **Finds out where your Claude Code money is going, and fixes the safe parts.**
 
-Claude Code can tell you what you spent — `/usage` gives you the number. What it
-does not tell you is *why*: which settings and which habits produced that
-number, and which of them are worth changing.
+Claude Code already tells you what you spent: `/usage` gives you the number, and
+on a subscription plan it also shows which skills, plugins and MCP servers your
+requests went through. What no built-in tells you is **what to change** — which
+of those are loaded on every single turn but never actually used, what a cheaper
+model would have cost for the same work, and which of your own habits are
+expensive.
 
 This skill looks at how your setup is configured and how you have been using it,
 then hands you a list of what is wasting money — with a dollar figure on each

@@ -61,9 +61,13 @@ Two files are written, for two different readers — do not confuse them:
 | `~/.claude/cost-inspector/last-report.md` | the user | markdown |
 | `~/.claude/cost-inspector/last-audit.json` | `cost-coach` | JSON, `schema_version` 1 |
 
-The report is printed to the terminal as fixed-width text and saved as real
+The script writes fixed-width text to stdout and saves the same report as real
 markdown (`--report PATH` to relocate, `--no-report` to skip). The JSON is the
 inter-skill handoff and is not meant to be read by a person.
+
+**The stdout copy is for you, not for them** — it lands inside a collapsed tool
+block. The markdown file is the one the user can actually open, so its path
+belongs in your reply. See *The user cannot see your tool output* below.
 
 ## Dollar figures are indicative — say so
 
@@ -91,20 +95,40 @@ So:
 - On a flat-fee subscription, dollars represent the value of capacity consumed
   rather than a charge.
 
-Print the report as the script produces it. Do not rewrite the numbers or
-re-summarise the findings in prose — the formatting is the deliverable, and
-paraphrasing invites drift from the measured values.
+## The user cannot see your tool output
+
+**Running the script shows the user nothing.** Bash output is collapsed behind a
+"Ran N commands" toggle, so from where they are sitting the report does not
+exist until you put it in your reply.
+
+**Never write "the full report is printed above", "see the output above", or
+anything similar.** It is not above. That sentence is the single most common way
+this skill fails: the user is told to read something they cannot see.
+
+Every run ends with, in this order:
+
+1. **A one-line TL;DR** — total avoidable spend, and the one biggest cause.
+2. **The savings table, pasted into your reply.** Copy the `What we found /
+   Saves per month / Who does it` table out of the generated markdown. Copy it;
+   do not retype the numbers.
+3. **The path to the saved report on its own line** —
+   `~/.claude/cost-inspector/last-report.md` — and say that it holds the full
+   reasoning, the fix commands and the docs links for every finding.
+4. **The offer to apply what is automatic**, one finding at a time.
 
 ## Presenting the results
 
-1. **Lead with the header block.** Spend, always-on extra, model mix, re-used
-   text.
-2. **Failures expand, passes collapse.** The script already does this.
+1. **Lead with the bottom line**, then the table. Not the methodology.
+2. **Failures expand, passes collapse.** The script already does this; one line
+   saying how many checks passed is enough.
 3. **Never inflate.** Every dollar figure comes from the script's arithmetic.
    Do not add estimates of your own, and do not extrapolate to annual figures
    unless asked.
 4. **"Nothing to fix" is a real result.** If the report is mostly passes, say
    so plainly. Do not hunt for something to recommend.
+5. **Do not re-summarise the findings in your own prose** beyond the TL;DR. The
+   generated wording is the deliverable and paraphrasing drifts from the
+   measured values.
 
 ## Write for someone who is not a power user
 
