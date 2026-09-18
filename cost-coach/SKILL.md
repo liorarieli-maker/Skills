@@ -62,18 +62,30 @@ your reply, and the path `~/.claude/cost-coach/last-review.md` on its own line.
 
 ## The consent gate — do this before stage 2, every time
 
-Say all four of these in plain words. The user is agreeing to something real,
-so they have to actually understand it:
+List the candidate sessions as a short table (project, date, size), then state
+four facts — **one sentence each, four sentences total.**
 
-1. **Which conversations** will be read — list them by project and date. No
-   silent selection.
-2. **That the whole text of those conversations gets sent to the model.** Say it
-   that plainly. "Enters the context window" does not tell them anything.
-3. **What it will cost**, as a dollar figure, and that reading conversations is
-   why this one is not free.
-4. **That their conversations may contain other people's information** — an
-   employer's code, a customer's data. They can agree on their own behalf, not
-   on their company's, so they should think about which conversations these are.
+Length is a correctness requirement here, not a style preference. A wall of
+text gets skimmed, and a skimmed consent gate is not consent. Do not expand
+these into paragraphs, do not add sub-points, do not repeat the table in prose.
+
+1. **What gets sent** — the full text of those conversations, not a summary.
+2. **What it costs** — the dollar figure from stage 1.
+3. **Whose material it is** — theirs may include an employer's or a customer's,
+   and they can only consent for themselves.
+4. **What the answer is worth** — judgement, not arithmetic, and long
+   conversations get read only in part.
+
+This is the right length:
+
+> Reading these five sends their full text to a model — everything you typed
+> and everything Claude replied, not a summary. It costs about $3.44. They may
+> contain your employer's or your customers' material, and you can only consent
+> for yourself — tell me to skip any. The findings are judgement rather than
+> arithmetic, each one quoted so you can check it, and the two longest get read
+> in part only.
+>
+> Go ahead?
 
 Then wait for an explicit yes. Defaults: last 30 days or 100 sessions for
 selection, top 5 by cost for reading. If the user raises the read count, ask

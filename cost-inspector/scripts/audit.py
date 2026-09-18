@@ -1488,6 +1488,28 @@ SELF_PATH = os.path.abspath(__file__)
 HOOK_PATH = os.path.join(os.path.dirname(SELF_PATH), "first_prompt_nudge.py")
 
 
+def open_in_viewer(path):
+    """Open the saved report in whatever the OS uses for .md files.
+
+    A file path in a chat reply is a dead end: the user is told where the
+    report is rather than being shown it. This is the cheap fix - it costs no
+    tokens and nothing leaves the machine, unlike pasting 11k characters into
+    the conversation or publishing it somewhere.
+
+    The path is one we just built ourselves, never user input, and the command
+    is passed as a list so there is no shell to interpret it."""
+    opener = {"darwin": "open", "win32": "start"}.get(sys.platform, "xdg-open")
+    try:
+        subprocess.run([opener, path], check=True,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                       timeout=10)
+        print("  Opened it in your default markdown viewer.")
+    except (OSError, subprocess.SubprocessError):
+        # Headless box, no desktop, no handler for .md - all fine, the file is
+        # already written and its path is already printed.
+        print("  (could not open it automatically - the path above still works)")
+
+
 def _apply_cmd(ids):
     """Absolute AND quoted: the saved report is read from anywhere, a relative
     `scripts/audit.py` only resolves inside the skill dir, and an unquoted path
@@ -1903,6 +1925,9 @@ def main():
                          f"(default {_short(REPORT_PATH)})")
     ap.add_argument("--no-report", action="store_true",
                     help="print only, do not save a report file")
+    ap.add_argument("--open", dest="open_report", action="store_true",
+                    help="open the saved report in your default markdown "
+                         "viewer once it is written")
     ap.add_argument("--calibration-status", action="store_true",
                     help="print whether a calibration is saved, and exit. Cheap "
                          "(no transcript scan) - call this first so you can ask "
@@ -2054,6 +2079,8 @@ def main():
             with open(dest, "w", encoding="utf-8") as fh:
                 fh.write(md + "\n")
             print(f"  Report saved to {os.path.abspath(dest)}")
+            if args.open_report:
+                open_in_viewer(os.path.abspath(dest))
         except OSError:
             print("  (could not save the report file)")
     return 0

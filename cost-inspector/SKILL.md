@@ -111,9 +111,20 @@ Every run ends with, in this order:
 2. **The savings table, pasted into your reply.** Copy the `What we found /
    Saves per month / Who does it` table out of the generated markdown. Copy it;
    do not retype the numbers.
-3. **The path to the saved report on its own line** —
-   `~/.claude/cost-inspector/last-report.md` — and say that it holds the full
-   reasoning, the fix commands and the docs links for every finding.
+3. **The saved report, offered as something they can actually read.** A path on
+   its own is a dead end — you are telling them where the report is instead of
+   giving it to them, and they have said so. Give the path
+   (`~/.claude/cost-inspector/last-report.md`), say it holds the full reasoning
+   and fix command for every finding, and **offer to open it in the same
+   breath**:
+
+   > Full report: `~/.claude/cost-inspector/last-report.md` — say the word and
+   > I'll open it, or paste any section here.
+
+   If they accept, re-run with `--open`, which opens it in their default
+   markdown viewer. Costs no tokens and nothing leaves the machine. Do not pass
+   `--open` uninvited: opening a window unasked is rude, and on a headless box
+   it does nothing.
 4. **The offer to apply what is automatic**, one finding at a time.
 
 ## Presenting the results
