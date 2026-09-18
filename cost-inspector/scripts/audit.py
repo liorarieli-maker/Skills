@@ -1042,25 +1042,21 @@ def check_models(h, settings, sources):
                 "most expensive model, you also pay that rate for 'rename this "
                 "variable'. Priced at Sonnet's rates instead, the exact same work "
                 "would have cost " + money(alt) + ". Read that as a best case: it "
-                "assumes Sonnet would have finished every one of those tasks.",
-            fix=("Because the model is chosen per session, no single setting can "
-                 "fix this for you. Two ways to handle it. (1) Switch by hand "
-                 "when you know a session is easy: type /model sonnet"
-                 + (", or change your default `model` setting. " if model_setting
-                    else ". ")
-                 + "(2) Turn on our optional reminder. It runs once, on your "
-                   "first message of a session, and stays quiet unless the task "
-                   "clearly does not need what you are paying for: "
-                   f'`python3 "{SELF_PATH}" --install-hook` '
-                   "(undo it with --remove-hook). "
-                   "One thing to know either way: switching model throws away "
-                   "the saved copy of your conversation, because that copy only "
-                   "works for the model it was made for. Everything said so far "
-                   "then gets re-sent at full price once. At your first message "
-                   "that is small change; fifty messages in it is several times "
-                   "worse. So switch at the start of a session, and if you find "
-                   "yourself switching often, change the default instead - "
-                   "starting on the cheaper model costs nothing at all."),
+                "assumes Sonnet would have finished every one of those tasks.\n\n"
+                "Switch at the *start* of a session, not halfway through. "
+                "Changing model throws away the saved copy of your conversation, "
+                "because that copy only works for the model it was made for, so "
+                "everything said so far gets re-sent at full price once. On your "
+                "first message that is small change; fifty messages in it is "
+                "several times worse. If you find yourself switching often, "
+                "change the default instead - starting on the cheaper model "
+                "costs nothing at all.",
+            fix=("Type /model sonnet at the start of a session you know is easy"
+                 + (", or change your default `model` setting. "
+                    if model_setting else ". ")
+                 + "You can also turn on a reminder that speaks up on your first "
+                   "message, and only when the task clearly does not need what "
+                   f'you are paying for: `python3 "{SELF_PATH}" --install-hook`'),
             can_fix="ASSISTED", doc=DOCS["model"], monthly_usd=half,
             payload={"model_setting": model_setting,
                      "upper_bound_usd": round(exp_cost - alt, 2),
@@ -1543,34 +1539,30 @@ def render_markdown(findings, h, version, window_days, warnings, cal, ref):
     spend_label = "Calibrated spend" if cal else "Estimated spend"
 
     out = ["# Cost Inspector report", ""]
-    out.append("*This report looks at how your Claude Code is set up and how you "
-               "use it, and points out where money is going to waste. Every "
-               "finding explains itself - you do not need to know how Claude "
-               "Code works internally to act on it.*")
-    out.append("")
 
-    # Bottom line first: the answer, then the evidence.
-    out.append("## The short version")
-    out.append("")
+    # Bottom line, then everything else folded away. The previous version put
+    # ~7.7k characters of reasoning on screen at once and got read as a wall of
+    # text, which is the one way a report like this fails: nobody acts on it.
+    # <details> is plain HTML and every common markdown viewer renders it as a
+    # real collapsible block; the ones that do not still show the content.
     if identified:
         pct = (identified / total * 100) if total else 0
-        out.append(f"**You could save about {money(identified)}/month** "
-                   f"({pct:.0f}% of your {money(total)} {spend_label.lower()}).")
+        out.append(f"## You could save about {money(identified)} a month")
+        out.append("")
+        out.append(f"That is {pct:.0f}% of your {money(total)} "
+                   f"{spend_label.lower()}. **{len(passes)} of {len(findings)} "
+                   f"checks passed.**")
     else:
-        out.append("**Nothing worth changing.** Every check passed, or the "
-                   "remaining findings have no measurable cost.")
+        out.append("## Nothing worth changing")
+        out.append("")
+        out.append(f"**{len(passes)} of {len(findings)} checks passed**, and the "
+                   "rest have no measurable cost.")
     out.append("")
-    out.append(f"**Setup score: {len(passes)}/{len(findings)} checks passed "
-               f"({score}%).**")
-    out.append("")
+
     if fixes_sorted:
         top = fixes_sorted[0]
         out.append(f"**Start here:** {top.title} — {money(top.monthly_usd)} a "
-                   f"month, the biggest single win on the list.")
-        if auto_save:
-            out.append("")
-            out.append(f"{money(auto_save)}/month of this can be done for you "
-                       "automatically — see *What to do* below.")
+                   f"month, the biggest single win.")
         out.append("")
         out.append("| What we found | Saves/month | Who does it |")
         out.append("|---|---|---|")
@@ -1579,49 +1571,9 @@ def render_markdown(findings, h, version, window_days, warnings, cal, ref):
                        f"| {FIXER_LABEL.get(f.can_fix, f.can_fix)} |")
         out.append("")
 
-    out.append("## Your numbers")
-    out.append("")
-    out.append(f"Based on {len(h.sessions)} sessions over the last {window_days} "
-               f"days. Run on {dt.datetime.now().strftime('%d %b %Y at %H:%M')} "
-               f"with Claude Code {version or 'unknown'}.")
-    out.append("")
-    out.append("| | | |")
-    out.append("|---|---|---|")
-    out.append(f"| **{spend_label}** | {money(total)} | what those "
-               "sessions cost |")
-    out.append(f"| Always-on extra | ~{fmt_tok(overhead)} tokens per message | "
-               "instructions, skill names and memory, re-sent every time you "
-               "hit enter |")
-    out.append(f"| On an expensive model | {share:.0f}% of messages | Opus or "
-               "Fable rather than Sonnet or Haiku |")
-    out.append(f"| Re-used text | {hit:.1f}% | text served from the cache at a "
-               "tenth of the price. Higher is better |")
-    out.append("")
-    if cal:
-        period = ""
-        if cal.get("period_start"):
-            period = (f" over {cal['period_start']} to "
-                      f"{(cal.get('period_end') or '')[:16]}")
-        out.append(f"> **About the dollar figures.** You told us you were "
-                   f"actually billed {money(cal['actual_spend'])}{period}. Over "
-                   f"the same period our own maths said "
-                   f"{money(cal['list_price_estimate'])}, so every figure in "
-                   f"this report has been scaled by **x{cal['factor']}** to "
-                   f"match your real bill.")
-    else:
-        out.append("> **About the dollar figures.** These are worked out from "
-                   "public list prices, so they usually come out **higher than "
-                   "your real bill** - about 1.8x higher on the one account we "
-                   "checked. Discounts and plans are not public, so we cannot "
-                   "guess yours. Tell us what you were actually billed and every "
-                   "figure gets corrected: re-run with `--actual-spend <amount> "
-                   "--spend-since <date>`. We remember it after that. Either "
-                   "way, the *order* of the findings is trustworthy - being off "
-                   "by the same factor everywhere does not change which problem "
-                   "is biggest.")
-    out.append("")
     for w in warnings:
-        out.append(f"> [!NOTE]\n> {w}")
+        out.append(f"> [!NOTE]")
+        out.append(f"> {w}")
         out.append("")
 
     if fixes:
@@ -1629,96 +1581,131 @@ def render_markdown(findings, h, version, window_days, warnings, cal, ref):
         out.append("## What to do")
         out.append("")
         if auto:
-            out.append(f"{len(auto)} of these can be done for you. Run them one "
-                       "at a time from the sections below, or all together with "
-                       "this:")
+            out.append(f"{money(auto_save)}/month of this is automatic. Nothing "
+                       "changes unless you run it, and a dated backup is saved "
+                       "first:")
             out.append("")
             out.append("```bash")
             out.append(_apply_cmd(",".join(auto)))
             out.append("```")
             out.append("")
-            out.append("Nothing changes unless you run that yourself, and a "
-                       "dated backup copy of every file is saved first, so you "
-                       "can always go back.")
-            out.append("")
+        out.append("Each finding below opens up to show why it costs money.")
+        out.append("")
+
         for f in sorted(fixes, key=lambda x: -x.monthly_usd):
             bits = []
             if f.monthly_usd:
-                bits.append(f"about {money(f.monthly_usd)} a month")
+                bits.append(f"{money(f.monthly_usd)}/mo")
             if f.tokens_per_turn:
-                bits.append(f"~{fmt_tok(f.tokens_per_turn)} extra tokens on "
-                            "every message")
-            impact = ", ".join(bits) or "real, but we cannot put a number on it"
+                bits.append(f"~{fmt_tok(f.tokens_per_turn)} tokens per message")
+            impact = " · ".join(bits) or "not quantified"
+            # Heading carries impact and owner, so the body does not repeat them.
             out.append(f"### {f.title}")
             out.append("")
-            out.append(f"**Costing you:** {impact}")
+            out.append(f"`{impact}` · "
+                       f"{FIXER_LABEL.get(f.can_fix, f.can_fix)}")
             out.append("")
-            out.append(f"**What we found:** {f.evidence}")
+            out.append(f"{f.evidence}")
             out.append("")
-            out.append(f"**Why this costs money:** {f.why}")
+            out.append(f"**Do this:** {f.fix}")
             out.append("")
-            out.append(f"**What to do:** {f.fix}")
-            out.append("")
-            # Make the saved report actionable on its own, not just readable.
             if f.can_fix == "AUTO":
-                out.append("**We can do this for you.** Run this, and a dated "
-                           "backup is saved before anything is touched:")
-                out.append("")
                 out.append("```bash")
                 out.append(_apply_cmd(f.id))
                 out.append("```")
-            elif f.can_fix == "ASSISTED":
-                out.append("_This one needs a judgement call, so there is no "
-                           "automatic fix. Ask Claude to show you exactly what "
-                           "it would change before it changes anything._")
-            elif f.can_fix == "MANUAL":
-                out.append("_You will need to do this one yourself - the script "
-                           "is not allowed to._")
-            elif f.can_fix == "NONE":
-                out.append("_Nothing to install here. This is a habit to "
-                           "change, not a setting._")
+                out.append("")
+            out.append("<details>")
+            out.append("<summary>Why this costs money</summary>")
+            out.append("")
+            out.append(f.why)
             if f.doc:
                 out.append("")
-                out.append(f"[Read the official docs on this]({f.doc})")
+                out.append(f"[Official docs]({f.doc})")
+            out.append("")
+            out.append("</details>")
             out.append("")
 
-    out.append("## Everything we checked and found fine")
+    out.append("## Everything else")
     out.append("")
-    out.append("Nothing to do here — this is just so you can see what was "
-               "looked at.")
+
+    out.append("<details>")
+    out.append(f"<summary>{len(passes)} checks passed — nothing to do</summary>")
     out.append("")
     out.append("| | Check | What we saw |")
     out.append("|---|---|---|")
     for f in findings:
         if f.status == "FIX":
             continue
-        label = STATUS_LABEL.get(f.status, f.status)
-        out.append(f"| {label} | {f.title} | {f.evidence} |")
+        out.append(f"| {STATUS_LABEL.get(f.status, f.status)} | {f.title} "
+                   f"| {f.evidence} |")
+    out.append("")
+    out.append("</details>")
     out.append("")
 
-    out.append("## Want a deeper look?")
+    out.append("<details>")
+    out.append(f"<summary>Your numbers — {len(h.sessions)} sessions over "
+               f"{window_days} days</summary>")
+    out.append("")
+    out.append("| | | |")
+    out.append("|---|---|---|")
+    out.append(f"| **{spend_label}** | {money(total)} | what those sessions "
+               "cost |")
+    out.append(f"| Always-on extra | ~{fmt_tok(overhead)} tokens per message | "
+               "instructions, skill names and memory, re-sent every time you "
+               "hit enter |")
+    out.append(f"| On an expensive model | {share:.0f}% of messages | Opus or "
+               "Fable rather than Sonnet or Haiku |")
+    out.append(f"| Re-used text | {hit:.1f}% | served from cache at a tenth of "
+               "the price. Higher is better |")
+    out.append("")
+    if cal:
+        period = ""
+        if cal.get("period_start"):
+            period = (f" over {cal['period_start']} to "
+                      f"{(cal.get('period_end') or '')[:16]}")
+        out.append(f"You told us you were actually billed "
+                   f"{money(cal['actual_spend'])}{period}. Our own maths said "
+                   f"{money(cal['list_price_estimate'])} for the same period, so "
+                   f"every figure here is scaled by **x{cal['factor']}** to match "
+                   f"your real bill.")
+    else:
+        out.append("These come from public list prices, so they usually land "
+                   "**higher than a real bill** — about 1.8x higher on the one "
+                   "account we checked. Re-run with `--actual-spend <amount> "
+                   "--spend-since <date>` and every figure gets corrected, and "
+                   "remembered. The *order* of the findings is right either way.")
+    out.append("")
+    out.append(f"Run {dt.datetime.now().strftime('%d %b %Y at %H:%M')} on Claude "
+               f"Code {version or 'unknown'}.")
+    out.append("")
+    out.append("</details>")
+    out.append("")
+
+    out.append("<details>")
+    out.append("<summary>Want a deeper look at how you work?</summary>")
     out.append("")
     if ref.get("recommended"):
         out.append("Everything above came from settings and totals. It cannot "
                    "see *how* you work — whether questions start clearly, "
-                   "whether work gets redone. A companion skill, **cost-coach**, "
+                   "whether work gets redone. The companion **cost-coach** skill "
                    "reads a few of your actual conversations and tells you that "
                    f"part. Your results suggest it is worth a look "
                    f"({ref['reason']}). It would read your 5 most expensive "
-                   f"sessions and cost roughly **${ref['forecast_usd']:.2f}** "
-                   "to run, because reading conversations is not free.")
+                   f"sessions for about **${ref['forecast_usd']:.2f}**, because "
+                   "reading conversations is not free.")
     else:
-        out.append("There is a companion skill, **cost-coach**, that reads a few "
-                   "of your actual conversations and comments on how you work. "
-                   "Based on what we see here, your sessions already look "
-                   "efficient, so it probably would not tell you enough to be "
-                   "worth what it costs to run.")
+        out.append("The companion **cost-coach** skill reads a few of your "
+                   "actual conversations and comments on how you work. Your "
+                   "sessions already look efficient, so it probably would not "
+                   "tell you enough to be worth what it costs.")
+    out.append("")
+    out.append("</details>")
     out.append("")
     out.append("---")
     out.append("")
-    out.append("*Privacy: this report was built only from your settings files "
-               "and from counters like token totals and tool names. It never "
-               "opened a single one of your conversations.*")
+    out.append("*Built only from your settings files and counters like token "
+               "totals and tool names. It never opened one of your "
+               "conversations.*")
     return "\n".join(out)
 
 
