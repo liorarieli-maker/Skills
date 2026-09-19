@@ -29,9 +29,30 @@ python3 scripts/audit.py --calibration-status
 - **`"action": "ask_user"`** — nothing saved. **Ask the user for their actual
   spend first**, then run with it. Say plainly why: without it every dollar
   figure is a list price, measured at ~1.8x a real bill on one Enterprise
-  account. Tell them where to look — their Claude usage/limits panel shows
-  "$X of $Y spent" and a reset date, which gives you both the amount and the
-  billing-period start.
+  account.
+
+  Ask for **three** things, not one — the output carries them in
+  `ask_user_for`:
+
+  1. the amount billed so far this period
+  2. the date the period started (`--spend-since`)
+  3. the time they read it (`--spend-asof`) — without this the factor decays
+     on every later run
+
+  **Name the exact screen for their plan.** "Your usage panel" is not an
+  answer; the place differs, and the output gives all three in
+  `how_to_find_it`:
+
+  | Plan | Where |
+  |---|---|
+  | Pro / Max | `/usage-credits`, or claude.ai → Settings → Usage → Usage credits |
+  | Team / Enterprise | claude.ai → Admin settings → Usage, or the org spend report from their admin |
+  | API / Console | platform.claude.com/usage |
+
+- **`"action": "proceed_managed_rates"`** — an admin has published the
+  organisation's contracted rates in the `modelPricing` managed setting, so
+  Claude Code is already using real rates. Do not ask for a spend figure;
+  say the figures are already close and run the audit.
 - **`"action": "ask_user_refresh"`** — the saved figure is over 14 days old.
   Ask for a fresh one; offer to proceed with the stale figure if they would
   rather not look it up.
@@ -181,13 +202,15 @@ python3 scripts/audit.py --apply A4,A5
 ```
 
 - **`AUTO`** — mechanical and reversible. `A4` (skill frontmatter), `A5`
-  (`enabledPlugins`), `C2` (compaction settings).
+  (`enabledPlugins`). **`C2` is not auto-appliable** and no longer touches any
+  setting: it is a habit, and the fix is `/clear` at the right moment.
 - **`A7` (auto-memory)** is `ASSISTED`: trimming a `MEMORY.md` is a judgement
   call about which memories still matter. Note that `MEMORY.md` is always-on
   overhead while the individual memory files load on demand — never price
   those as per-turn cost.
 - **`ASSISTED`** — propose the edit, let the user decide. Splitting a CLAUDE.md
-  is a judgement call about which rules belong where.
+  is a judgement call about which rules belong where. Prefer `skillOverrides`
+  for a single unused skill inside a plugin over disabling the whole plugin.
 - **`MANUAL`** — print the command; the script cannot run it.
 - **`NONE`** — diagnostic only.
 
@@ -222,6 +245,16 @@ The script ends with one line about whether a conversation review looks
 worthwhile, based on the category-D signals, and includes what it would cost.
 When it says the patterns look efficient, pass that on as-is — recommending the
 other skill anyway turns a referral into an advert.
+
+**`C2` is the clearest case of what this skill cannot do.** It can measure that
+a session carried a large conversation for hundreds of messages, and price it.
+It cannot tell whether that history was still being used. Its dollar figure
+therefore assumes the worst — that everything above the line was dead weight —
+which makes it an upper bound, not an estimate. Say so when presenting it.
+`cost-coach` reads the conversation and can find the actual moment the old
+material stopped earning its keep, so a `C2` finding is a good reason to
+mention the referral. Never present the `C2` figure as what the user would
+have saved.
 
 Findings are written to `~/.claude/cost-inspector/last-audit.json`
 (`schema_version` 1) which `cost-coach` reads if present. Writing it is

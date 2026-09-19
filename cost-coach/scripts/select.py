@@ -26,6 +26,24 @@ REFERRAL_MAX_AGE_DAYS = 14
 REVIEW_MODEL = "claude-sonnet-5"
 REVIEW_INPUT_RATE = 2.0  # $/MTok for REVIEW_MODEL
 
+# `bloated-session` is the one lens measurable from metadata alone, so it is
+# computed here for free rather than paid for in the extract.
+#
+# Deliberately an ABSOLUTE threshold, not a fraction of the context window.
+# A message costs what the conversation costs, so one carrying 500k costs five
+# times one carrying 100k - the window limit does not change that. Measuring
+# "half the window" would let the same dollar pass unflagged on a long-context
+# model and flagged on a short one. The window is also not recoverable: the
+# transcript records `claude-opus-5` whether or not the session ran with the
+# 1M setting, so any fraction rule would be guessing anyway.
+HIGH_CONTEXT_TOKENS = 100_000
+HIGH_CONTEXT_MIN_RUN = 25   # below this it is a long task, not a habit
+
+# Cache reads are what a long conversation actually bills: the text is re-sent
+# every message but served at roughly a tenth of input price. Opus rate; the
+# figure is an estimate and the report says so.
+CACHE_READ_RATE = 1.5  # $/MTok
+
 DEFAULT_SELECT_DAYS = 30
 DEFAULT_SELECT_SESSIONS = 100
 DEFAULT_READ_COUNT = 5
@@ -88,6 +106,7 @@ def scan_sessions(select_days, max_sessions, include_active=False):
 
     for path in paths:
         peak = turns = 0
+        ctx_series = []
         models = collections.Counter()
         tools = collections.Counter()
         last = None
@@ -107,6 +126,7 @@ def scan_sessions(select_days, max_sessions, include_active=False):
                 ctx = ((usage.get("input_tokens") or 0)
                        + (usage.get("cache_read_input_tokens") or 0))
                 peak = max(peak, ctx)
+                ctx_series.append(ctx)
             content = msg.get("content")
             if isinstance(content, list):
                 for block in content:
@@ -124,10 +144,40 @@ def scan_sessions(select_days, max_sessions, include_active=False):
             "models": dict(models),
             "top_tools": dict(tools.most_common(5)),
             "read_cost_usd": round(peak / 1e6 * REVIEW_INPUT_RATE, 2),
+            **high_context_stats(ctx_series),
         })
 
     rows.sort(key=lambda r: -r["peak_context_tokens"])
     return rows[:max_sessions], skipped_active
+
+
+def high_context_stats(ctx_series):
+    """How much of the session was spent carrying an expensive conversation.
+
+    Free to compute and not a judgement call, which makes it the one finding
+    nobody can argue with. Reported as messages and dollars, not a verdict:
+    whether clearing out would have paid off depends on how much work was left
+    afterwards, and the reviewing model decides that.
+
+    `carried_usd` is the part of the bill attributable to conversation above
+    the threshold - what a well-timed reset could plausibly have avoided, not
+    the session's total cost.
+    """
+    high = [c for c in ctx_series if c > HIGH_CONTEXT_TOKENS]
+    # Longest unbroken stretch above the line - one spike before a compaction
+    # is normal; a long run without one is the pattern worth naming.
+    run = best = 0
+    for c in ctx_series:
+        run = run + 1 if c > HIGH_CONTEXT_TOKENS else 0
+        best = max(best, run)
+    carried = sum(c - HIGH_CONTEXT_TOKENS for c in high)
+    return {
+        "high_context_threshold": HIGH_CONTEXT_TOKENS,
+        "high_context_turns": len(high),
+        "longest_high_context_run": best,
+        "carried_usd": round(carried / 1e6 * CACHE_READ_RATE, 2),
+        "bloated": best >= HIGH_CONTEXT_MIN_RUN,
+    }
 
 
 def load_referral():
@@ -192,6 +242,9 @@ def main():
             "sessions": [
                 {k: r[k] for k in ("session_id", "project", "last_active",
                                    "turns", "peak_context_tokens",
+                                   "high_context_turns",
+                                   "longest_high_context_run",
+                                   "carried_usd", "bloated",
                                    "read_cost_usd")}
                 for r in chosen
             ],

@@ -45,6 +45,14 @@ WRITE_MULT_5M = 1.25
 WRITE_MULT_1H = 2.0
 CHARS_PER_TOKEN = 4  # coarse; only used for on-disk text we cannot tokenize
 
+# Where a conversation starts being expensive to carry, in absolute tokens.
+# Deliberately not a fraction of the context window: a message carrying 500k
+# costs five times one carrying 100k, and the window limit does not change
+# that. The window is not recoverable from a transcript anyway - it records
+# `claude-opus-5` whether or not the session ran with the 1M setting.
+HIGH_CONTEXT_TOKENS = 100_000
+HIGH_CONTEXT_MIN_RUN = 25   # below this it is one long task, not a habit
+
 # List-price estimates do not match real bills. Measured against one Enterprise
 # account, this model ran 1.82x the actual billed amount - negotiated rates,
 # plan discounts and billing details we cannot see all push the same way.
@@ -163,28 +171,69 @@ def load_settings(cwd):
     return merged, sources
 
 
-def mcp_servers():
-    names = set()
-    for path in (os.path.join(HOME, ".claude.json"),
-                 os.path.join(CLAUDE_DIR, "settings.json"),
-                 os.path.join(os.getcwd(), ".mcp.json")):
+def mcp_servers(cwd=None):
+    """MCP servers split by whether they actually load in THIS session.
+
+    `~/.claude.json` holds a per-project map. Walking the whole file collects
+    every server the user has ever configured anywhere and bills all of them
+    as always-on overhead here, which is wrong: project-scoped servers are
+    matched on the exact directory and do not inherit into subfolders.
+
+    Returns {"active": set, "other_projects": {name: [dirs]}, "needs_auth": set}.
+    Only "active" may be priced.
+    """
+    cwd = os.path.realpath(cwd or os.getcwd())
+    active, other = set(), collections.defaultdict(list)
+
+    root = read_json(os.path.join(HOME, ".claude.json")) or {}
+    # User scope: top-level mcpServers, loaded in every session.
+    if isinstance(root.get("mcpServers"), dict):
+        active.update(root["mcpServers"].keys())
+
+    # Project scope: exact-directory match only.
+    projects = root.get("projects")
+    if isinstance(projects, dict):
+        for path, cfg in projects.items():
+            if not isinstance(cfg, dict):
+                continue
+            names = set(cfg.get("mcpServers", {}) or {})
+            names.update(cfg.get("enabledMcpjsonServers", []) or [])
+            if not names:
+                continue
+            try:
+                same = os.path.realpath(path) == cwd
+            except OSError:
+                same = False
+            if same:
+                active.update(names)
+            else:
+                for n in names:
+                    other[n].append(path)
+
+    # settings.json is user scope; .mcp.json is this directory.
+    for path in (os.path.join(CLAUDE_DIR, "settings.json"),
+                 os.path.join(cwd, ".mcp.json")):
         data = read_json(path)
-        if data is None:
-            continue
+        if isinstance(data, dict) and isinstance(data.get("mcpServers"), dict):
+            active.update(data["mcpServers"].keys())
 
-        def walk(node):
-            if isinstance(node, dict):
-                for k, v in node.items():
-                    if k == "mcpServers" and isinstance(v, dict):
-                        names.update(v.keys())
-                    else:
-                        walk(v)
-            elif isinstance(node, list):
-                for item in node:
-                    walk(item)
+    # A .mcp.json server the user explicitly declined does not load.
+    here = (projects or {}).get(cwd) if isinstance(projects, dict) else None
+    if isinstance(here, dict):
+        active -= set(here.get("disabledMcpjsonServers", []) or [])
 
-        walk(data)
-    return names
+    # Servers still waiting on an OAuth flow register no tools until approved.
+    auth = read_json(os.path.join(CLAUDE_DIR, "mcp-needs-auth-cache.json"))
+    needs_auth = set()
+    if isinstance(auth, dict):
+        for key in auth:
+            short = str(key).split(":")[-1].strip()
+            for name in list(active):
+                if name == key or name.lower() == short.lower():
+                    needs_auth.add(name)
+
+    other = {n: dirs for n, dirs in other.items() if n not in active}
+    return {"active": active, "other_projects": other, "needs_auth": needs_auth}
 
 
 # --------------------------------------------------------------------------
@@ -231,7 +280,9 @@ def scan_skills():
                 plugin = rel[0] if rel else None
             out.append({
                 "path": path, "kind": kind, "name": name, "plugin": plugin,
-                "bytes": len(name) + len(desc), "disabled": disabled,
+                # The skill listing truncates description text at 1,536
+                # characters, so a longer one costs no more than that.
+                "bytes": len(name) + min(len(desc), 1536), "disabled": disabled,
                 "mtime": mtime,
             })
     return out
@@ -309,18 +360,39 @@ class History:
         self.cal_by_model = collections.defaultdict(collections.Counter)
         self.tool_calls = collections.Counter()
         self.skill_invocations = collections.Counter()
+        # A plugin ships agents and MCP servers too, not just skills. Counting
+        # only Skill calls let A5 mark a plugin unused - and AUTO-disable it -
+        # while its agents were in daily use.
+        self.agent_invocations = collections.Counter()
         self.sidechain_turns = 0
         self.subagent_turns = 0
         self.subagent_models = collections.Counter()
         self.mcp_used = set()
+        # server -> set(tool names), across ALL history. The windowed
+        # tool_calls counter undercounts tools-per-server badly, and that
+        # average is what A6 extrapolates from.
+        self.mcp_tools_seen = collections.defaultdict(set)
         self.denials = 0
         self.dup_reads = 0
+        self.image_reads = 0
         self.dup_read_bytes = 0
         self.earliest = None
         self.latest = None
         self.bad_lines = 0        # malformed JSON in a .jsonl transcript
         self.text_lines = 0       # expected plain text in mixed-format .output
         self.session_peak = {}    # session key -> peak context tokens
+        # session key -> cache-read tokens. Peak context is a snapshot; this
+        # is the volume actually re-sent, which is what carrying a long
+        # conversation costs.
+        self.session_cache_read = collections.Counter()
+        # Peak alone says how big a session got, not how long it stayed big -
+        # and the bill is the second one. A session that touched 400k on its
+        # last message costs far less than one that sat at 300k for 400
+        # messages, yet peak ranks them the same way.
+        self.session_high_turns = {}   # key -> messages above HIGH_CONTEXT
+        self.session_high_run = {}     # key -> longest unbroken such stretch
+        self.session_cur_run = {}      # key -> current stretch (working state)
+        self.session_carried = {}      # key -> tokens carried above the line
         self.cwds = set()         # exact project dirs, from transcripts
         self.missing_usage = 0
         self.write_ttl_known = 0
@@ -406,6 +478,16 @@ def scan_history(window_days, cal_since=None, cal_until=None):
                 usage = msg.get("usage")
                 model = msg.get("model") or "unknown"
                 if isinstance(usage, dict):
+                    # Calibration is bounded by cal_since/cal_until, NOT by the
+                    # reporting window. Nesting it inside the window gate made
+                    # the correction factor depend on --days: on this machine
+                    # --days 7 gave x1.581 and --days 30 gave x0.551 for the
+                    # same billing period, a 2.9x swing in every dollar figure
+                    # from a flag that should only change what is reported.
+                    if (cal_since is not None and ts is not None
+                            and ts >= cal_since
+                            and (cal_until is None or ts <= cal_until)):
+                        _accumulate(h.cal_by_model[model], usage)
                     if ts and ts < cutoff:
                         pass  # outside window: counted only for span
                     else:
@@ -424,20 +506,23 @@ def scan_history(window_days, cal_since=None, cal_until=None):
                         c["turns"] += 1
                         h.turns += 1
                         key = (path, session_id)
-                        # Calibration must cover exactly the period the user's
-                        # billed figure covers - bounded at BOTH ends. Without
-                        # an upper bound, usage accrued after they read their
-                        # bill inflates the denominator and the factor decays
-                        # silently on every later run.
-                        if (cal_since is not None and ts is not None
-                                and ts >= cal_since
-                                and (cal_until is None or ts <= cal_until)):
-                            _accumulate(h.cal_by_model[model], usage)
                         h.sessions.add(key)
                         ctx = ((usage.get("input_tokens") or 0)
                                + (usage.get("cache_read_input_tokens") or 0))
                         if ctx > h.session_peak.get(key, 0):
                             h.session_peak[key] = ctx
+                        h.session_cache_read[key] += (
+                            usage.get("cache_read_input_tokens") or 0)
+                        if ctx > HIGH_CONTEXT_TOKENS:
+                            h.session_high_turns[key] = h.session_high_turns.get(key, 0) + 1
+                            h.session_carried[key] = (h.session_carried.get(key, 0)
+                                                      + ctx - HIGH_CONTEXT_TOKENS)
+                            run = h.session_cur_run.get(key, 0) + 1
+                            h.session_cur_run[key] = run
+                            if run > h.session_high_run.get(key, 0):
+                                h.session_high_run[key] = run
+                        else:
+                            h.session_cur_run[key] = 0
                         if is_sub:
                             h.subagent_turns += 1
                             h.subagent_models[model] += 1
@@ -447,6 +532,17 @@ def scan_history(window_days, cal_since=None, cal_until=None):
                     h.missing_usage += 1
 
                 content = msg.get("content")
+                if isinstance(content, list):
+                    # Tool NAMES are inventory, not activity: collect them from
+                    # all history so the A6 estimate has a real sample, even
+                    # for turns outside the reporting window.
+                    for block in content:
+                        if (isinstance(block, dict)
+                                and block.get("type") == "tool_use"
+                                and str(block.get("name") or "").startswith("mcp__")):
+                            parts = str(block["name"]).split("__")
+                            if len(parts) > 2:
+                                h.mcp_tools_seen[parts[1]].add(parts[2])
                 if isinstance(content, list) and not (ts and ts < cutoff):
                     for block in content:
                         if not isinstance(block, dict) or block.get("type") != "tool_use":
@@ -462,12 +558,25 @@ def scan_history(window_days, cal_since=None, cal_until=None):
                             continue
                         if name == "Skill" and inp.get("skill"):
                             h.skill_invocations[str(inp["skill"])] += 1
+                        if name in ("Task", "Agent") and inp.get("subagent_type"):
+                            h.agent_invocations[str(inp["subagent_type"])] += 1
                         if name == "Read" and inp.get("file_path"):
                             key = str(inp["file_path"])
+                            if key.lower().endswith(
+                                    (".png", ".jpg", ".jpeg", ".gif", ".webp",
+                                     ".bmp", ".svg")):
+                                h.image_reads += 1
+                            # A ranged Read copies only part of the file;
+                            # charging the whole thing overstated a partial
+                            # read of a large file by an order of magnitude.
                             try:
-                                reads["__last_size__"] = os.path.getsize(key)
+                                size = os.path.getsize(key)
                             except OSError:
-                                reads["__last_size__"] = 0
+                                size = 0
+                            limit = inp.get("limit")
+                            if isinstance(limit, int) and limit > 0:
+                                size = min(size, limit * 80)  # ~80 chars/line
+                            reads["__last_size__"] = size
                             reads[key] += 1
                             if reads[key] > 1:
                                 h.dup_reads += 1
@@ -646,66 +755,129 @@ def other_project_claude_md(cwd, known_cwds, limit=40):
     return found[:limit]
 
 
-def check_claude_md(entries, h, wmult, elsewhere=None):
-    findings = []
-    eager = [e for e in entries if e["role"] in ("global", "project")]
-    # A1 is a machine-wide inventory: every project's CLAUDE.md is always-on
-    # overhead *in that project*, so reporting only the current directory hides
-    # most of the cost. A2 stays cwd-relative because ancestor stacking is
-    # inherently a property of where you are.
-    everywhere = list(eager) + list(elsewhere or [])
-    biggest = max(everywhere, key=lambda e: e["lines"], default=None)
-    over = [e for e in everywhere if e["lines"] > 200]
-    if over:
-        tok = sum(e["bytes"] for e in over) / CHARS_PER_TOKEN
-        findings.append(Finding(
-            "A1", "Long instruction files", "FIX",
-            evidence=f"{len(over)} of {len(everywhere)} files over 200 lines: "
-                     + "; ".join(f"{_short(e['path'])} ({e['lines']})"
-                                 for e in over[:5]),
-            why="CLAUDE.md is your instructions file for Claude. Claude re-reads "
-                "it on every single message, so every line in it costs you money "
-                "all day long. Two of them are read this way: the one in your "
-                "project folder, and your global one. A CLAUDE.md inside a "
-                "sub-folder is different - Claude only reads that one if it "
-                "opens a file in that sub-folder. Aim for under 200 lines each.",
-            fix="Take the rules that only matter inside one sub-folder and move "
-                "them into a CLAUDE.md in that sub-folder. Delete anything "
-                "out of date.",
-            can_fix="ASSISTED", doc=DOCS["memory"],
-            tokens_per_turn=tok, monthly_usd=overhead_monthly_usd(tok, h, wmult)))
-    elif not everywhere:
-        findings.append(Finding("A1", "Long instruction files", "N/A",
-                                evidence="you do not have any CLAUDE.md instruction files yet"))
-    else:
-        n = biggest["lines"] if biggest else 0
-        total_tok = sum(e["bytes"] for e in everywhere) / CHARS_PER_TOKEN
-        findings.append(Finding(
-            "A1", "Long instruction files", "PASS",
-            evidence=f"{len(everywhere)} file(s) across your projects, largest "
-                     f"{n} lines - all under the 200-line guideline "
-                     f"(~{int(total_tok)} tokens in total)"))
+def check_claude_md(entries, h, wmult, elsewhere=None, cwd=None):
+    """A1/A2, rewritten.
 
-    anc = [e for e in entries if e["role"] == "ancestor"]
-    if anc:
-        tok = sum(e["bytes"] for e in anc) / CHARS_PER_TOKEN
+    A1 was a machine-wide sum: every project's oversized CLAUDE.md added
+    together and priced as if all of them loaded on every message. You are
+    only ever in one project. A7 already had the right pattern - price the
+    place you are, list the rest - and this now copies it.
+
+    A2 used to fire whenever any ancestor CLAUDE.md existed. But nested
+    CLAUDE.md files are the recommended layout: a short root file plus
+    per-subfolder context that loads on demand. Once you work inside the
+    subfolder its parents are ancestors, so the old check flagged a
+    well-organised setup as waste. It is inverted here: the problem is not
+    too many files, it is a root file carrying rules that belong in one
+    subfolder.
+    """
+    findings = []
+    loaded = [e for e in entries if e["role"] in ("global", "project", "ancestor")]
+    total_tok = sum(e["bytes"] for e in loaded) / CHARS_PER_TOKEN
+    total_lines = sum(e["lines"] for e in loaded)
+
+    if not loaded:
+        findings.append(Finding("A1", "Instructions loaded on every message", "N/A",
+                                evidence="you do not have any CLAUDE.md instruction files yet"))
+    elif total_lines > 200:
         findings.append(Finding(
-            "A2", "Instruction files stacking up", "FIX",
-            evidence="; ".join(f"{_short(e['path'])} ~{int(e['bytes']/CHARS_PER_TOKEN)} tok"
-                               for e in anc),
-            why="Claude reads the CLAUDE.md in the folder you are working in, "
-                "plus the one in every folder above it, and adds them all "
-                "together. So a big instructions file sitting near the top of "
-                "your drive gets paid for in every project underneath it, on "
-                "every message.",
-            fix="Move rules that belong to one project down into that project's "
-                "folder. In the folders above, keep only the rules you genuinely "
-                "want applied everywhere.",
+            "A1", "Instructions loaded on every message", "FIX",
+            evidence=f"{total_lines} lines across {len(loaded)} file(s) load on "
+                     "every message here: "
+                     + "; ".join(f"{_short(e['path'])} ({e['lines']})"
+                                 for e in sorted(loaded, key=lambda x: -x["lines"])[:5]),
+            why="CLAUDE.md is your instructions file. Claude re-reads it on "
+                "every single message, so every line costs you all day. In this "
+                "folder several stack up: your global one, the one here, and "
+                "one in every folder above. They are added together. A "
+                "CLAUDE.md inside a sub-folder is different - that one is only "
+                "read if Claude opens a file in that sub-folder. Aim for under "
+                "200 lines in total.",
+            fix="Move rules that only matter in one sub-folder into a CLAUDE.md "
+                "there, so they load only when relevant. For rules that apply "
+                "to particular file types, put them in .claude/rules/ with a "
+                "'paths:' line - those load only when Claude touches a matching "
+                "file. Delete anything out of date.",
             can_fix="ASSISTED", doc=DOCS["memory"],
-            tokens_per_turn=tok, monthly_usd=overhead_monthly_usd(tok, h, wmult)))
+            tokens_per_turn=total_tok,
+            monthly_usd=overhead_monthly_usd(total_tok, h, wmult)))
     else:
-        findings.append(Finding("A2", "Instruction files stacking up", "PASS",
-                                evidence="no instruction files in the folders above this one"))
+        nested = "" 
+        findings.append(Finding(
+            "A1", "Instructions loaded on every message", "PASS",
+            evidence=f"{total_lines} lines across {len(loaded)} file(s) "
+                     f"(~{int(total_tok)} tokens) - under the 200-line guideline"))
+
+    # Machine-wide view: real, but not a cost you pay here. Unpriced.
+    big_elsewhere = [e for e in (elsewhere or []) if e["lines"] > 200]
+    if big_elsewhere:
+        findings.append(Finding(
+            "A1b", "Long instruction files in other projects", "N/A",
+            evidence=f"{len(big_elsewhere)} file(s) over 200 lines elsewhere: "
+                     + "; ".join(f"{_short(e['path'])} ({e['lines']})"
+                                 for e in big_elsewhere[:5]),
+            why="These load when you work in those projects, not in this one, "
+                "so they cost you nothing right now. Listed so you know they "
+                "are there - they are not counted in the total above.",
+            fix="Run the audit from those folders to see what they cost there.",
+            can_fix="NONE", doc=DOCS["memory"]))
+
+    # ---- A2, inverted: is the always-on file doing sub-folder work? -----
+    project = [e for e in entries if e["role"] == "project"]
+    proj_lines = sum(e["lines"] for e in project)
+    subdirs, nested_files = set(), 0
+    root = os.path.realpath(cwd or os.getcwd())
+    for d in (h.cwds or set()):
+        try:
+            rd = os.path.realpath(d)
+        except OSError:
+            continue
+        if rd != root and rd.startswith(root + os.sep):
+            subdirs.add(rd)
+            for cand in (os.path.join(rd, "CLAUDE.md"),
+                         os.path.join(rd, ".claude", "CLAUDE.md")):
+                if os.path.isfile(cand):
+                    nested_files += 1
+    rules_dir = os.path.join(root, ".claude", "rules")
+    has_rules = os.path.isdir(rules_dir) and bool(
+        glob.glob(os.path.join(rules_dir, "**", "*.md"), recursive=True))
+
+    if not project:
+        findings.append(Finding("A2", "Instructions in the wrong place", "N/A",
+                                evidence="no project instructions file here"))
+    elif nested_files or has_rules:
+        findings.append(Finding(
+            "A2", "Instructions in the wrong place", "PASS",
+            evidence=f"project file is {proj_lines} lines and you also have "
+                     + (f"{nested_files} sub-folder CLAUDE.md file(s)" if nested_files else "")
+                     + (" and " if nested_files and has_rules else "")
+                     + ("path-scoped rules in .claude/rules/" if has_rules else "")
+                     + " - context is split so it loads only when relevant"))
+    elif proj_lines > 150 and len(subdirs) >= 3:
+        # Unit rate, not a total: we cannot know which rules are splittable,
+        # so quoting a saving would be inventing one.
+        per_100 = overhead_monthly_usd(100 * 80 / CHARS_PER_TOKEN, h, wmult)
+        findings.append(Finding(
+            "A2", "Instructions in the wrong place", "FIX",
+            evidence=f"your project file is {proj_lines} lines and you have "
+                     f"worked in {len(subdirs)} sub-folders here, none of which "
+                     "has its own instructions file",
+            why="Rules that only matter in one part of the project are being "
+                "paid for in all of it, on every message. A CLAUDE.md inside a "
+                "sub-folder only loads when Claude opens a file there, and a "
+                "file in .claude/rules/ with a 'paths:' line only loads when "
+                "Claude touches a matching file. Splitting is the recommended "
+                "layout, not a workaround.",
+            fix="Show me the file and I will point out which rules name a "
+                "single sub-folder, then move them. Every 100 lines moved down "
+                f"saves roughly {money(per_100)} a month here.",
+            can_fix="ASSISTED", doc=DOCS["memory"]))
+    else:
+        findings.append(Finding(
+            "A2", "Instructions in the wrong place", "PASS",
+            evidence=f"project file is {proj_lines} lines across "
+                     f"{len(subdirs)} active sub-folder(s) - small enough that "
+                     "splitting it would not pay off"))
 
     imports = [(e, i) for e in entries for i in e["imports"]]
     if imports:
@@ -744,23 +916,34 @@ def _invoked(name, plugin, invocations):
 def check_skills(skills, h, window_days, wmult, enabled_plugins):
     findings = []
     personal = [s for s in skills if s["kind"] == "personal" and not s["disabled"]]
-    stale = []
+    # Two tiers. Only a skill old enough to have had the full window to prove
+    # itself is priced or auto-fixed; a younger one is reported with its real
+    # age and nothing else. Saying "not used in 30 days" about a 9-day-old
+    # skill is simply false, and this tool is sold on not doing that.
+    stale, young = [], []
     for s in personal:
+        if _invoked(s["name"], None, h.skill_invocations):
+            continue
         win = unused_window(h, window_days, s["mtime"])
-        if win < 7:
-            continue  # too new to judge
-        if not _invoked(s["name"], None, h.skill_invocations):
-            stale.append(s)
+        if win >= window_days - 0.5:
+            stale.append((s, win))
+        elif win >= 7:
+            young.append((s, win))
 
     if not h.turns:
         findings.append(Finding("A4", "Skills you never use", "UNKNOWN",
                                 evidence="no session history to look at yet"))
     elif stale:
-        tok = sum(s["bytes"] for s in stale) / CHARS_PER_TOKEN
+        tok = sum(s["bytes"] for s, _ in stale) / CHARS_PER_TOKEN
+        extra = ""
+        if young:
+            extra = ("; also " + ", ".join(f"{s['name']} (new, {w:.0f}d old)"
+                                           for s, w in young[:3])
+                     + " - too new to judge, not counted")
         findings.append(Finding(
             "A4", "Skills you never use", "FIX",
             evidence=f"{len(stale)} skills you have not used in {window_days} days: "
-                     + ", ".join(s["name"] for s in stale[:8]),
+                     + ", ".join(s["name"] for s, _ in stale[:8]) + extra,
             why="So Claude can pick a skill on its own, it keeps every skill's "
                 "name and description in front of it on every message - "
                 "including the ones you never use. One line takes a skill off "
@@ -771,7 +954,7 @@ def check_skills(skills, h, window_days, wmult, enabled_plugins):
                 "each one by name.",
             can_fix="AUTO", doc=DOCS["skills"],
             tokens_per_turn=tok, monthly_usd=overhead_monthly_usd(tok, h, wmult),
-            payload={"paths": [s["path"] for s in stale]}))
+            payload={"paths": [s["path"] for s, _ in stale]}))
     else:
         findings.append(Finding("A4", "Skills you never use", "PASS",
                                 evidence=f"{len(personal)} of your own skills - all either used "
@@ -788,9 +971,18 @@ def check_skills(skills, h, window_days, wmult, enabled_plugins):
         if active.get(plugin) is False:
             continue
         newest = max(s["mtime"] for s in group)
-        if unused_window(h, window_days, newest) < 7:
+        # Same two-tier rule as A4: only judge a plugin that has had the whole
+        # window to be used.
+        if unused_window(h, window_days, newest) < window_days - 0.5:
             continue
         if any(_invoked(s["name"], plugin, h.skill_invocations) for s in group):
+            continue
+        # An agent or MCP tool from this plugin counts as using the plugin.
+        if any(k == plugin or k.startswith(f"{plugin}:")
+               for k in h.agent_invocations):
+            continue
+        if any(plugin.lower() in used.lower() or used.lower() in plugin.lower()
+               for used in h.mcp_used):
             continue
         idle.append((plugin, group))
 
@@ -809,9 +1001,16 @@ def check_skills(skills, h, window_days, wmult, enabled_plugins):
                 "carries on every message. You cannot switch off one skill inside "
                 "a plugin, so the whole plugin is the only on/off switch. Turning "
                 "it off does not delete it - you can turn it back on any time.",
-            fix="Type this in Claude Code: "
+            fix="Hide just the skills you do not use, which keeps the "
+                "plugin's agents and tools working - add them to "
+                "'skillOverrides' in your settings. Only turn the whole plugin "
+                "off if you use none of it: "
                 + "; ".join(f"/plugin disable {p}" for p in names[:4]),
-            can_fix="AUTO", doc=DOCS["plugins"],
+            # ASSISTED, not AUTO: "unused" is inferred from invocations we can
+            # see, and a plugin's hooks leave no trace at all. Silently
+            # disabling a plugin someone relies on is not a reversible
+            # mechanical edit in the sense the AUTO contract promises.
+            can_fix="ASSISTED", doc=DOCS["plugins"],
             tokens_per_turn=tok, monthly_usd=overhead_monthly_usd(tok, h, wmult),
             payload={"plugins": names, "enabled_keys": list(enabled_plugins or {})}))
     else:
@@ -820,10 +1019,27 @@ def check_skills(skills, h, window_days, wmult, enabled_plugins):
     return findings
 
 
+# An MCP server you actually use still carries its tool names on every
+# message. A CLI does not - Claude just runs it. So the swap is worth more on
+# a server you USE than on one you have already been told to disconnect.
 CLI_ALTERNATIVES = {
     "github": "gh", "atlassian": "acli", "jira": "acli",
-    "confluence": "acli", "gitlab": "glab",
+    "confluence": "acli", "gitlab": "glab", "aws": "aws",
+    "gcloud": "gcloud", "google-cloud": "gcloud", "sentry": "sentry-cli",
+    "docker": "docker", "kubernetes": "kubectl", "k8s": "kubectl",
+    "stripe": "stripe", "vercel": "vercel", "netlify": "netlify",
+    "heroku": "heroku", "supabase": "supabase", "linear": "linear",
+    "cloudflare": "wrangler", "npm": "npm", "postgres": "psql",
 }
+
+
+def _cli_for(server):
+    """The CLI that replaces this server, if one is known."""
+    low = server.lower()
+    for key, cli in CLI_ALTERNATIVES.items():
+        if key in low:
+            return cli
+    return None
 
 
 
@@ -865,7 +1081,14 @@ def check_memory(cwd, h, wmult):
         if not text.strip():
             continue
         indexes += 1
-        tok = len(text) / CHARS_PER_TOKEN
+        # Only the first 200 lines or 25KB of MEMORY.md load, whichever comes
+        # first. Pricing the whole file bills for text that never reaches
+        # Claude - and the overflow is a correctness problem, not a cost one.
+        MEM_BYTE_LIMIT = 25 * 1024
+        head = "\n".join(text.splitlines()[:MEMORY_LINE_COUNT])[:MEM_BYTE_LIMIT]
+        dropped_lines = max(0, len(text.splitlines()) - MEMORY_LINE_COUNT)
+        dropped_bytes = max(0, len(text) - MEM_BYTE_LIMIT)
+        tok = len(head) / CHARS_PER_TOKEN
         total_tok += tok
         worst_tok = max(worst_tok, tok)
         lines = [ln for ln in text.splitlines() if ln.strip()]
@@ -877,8 +1100,12 @@ def check_memory(cwd, h, wmult):
         long_lines = [ln for ln in lines
                       if ln.startswith("-") and len(ln) > MEMORY_LINE_LIMIT]
         bits = []
-        if len(lines) > MEMORY_LINE_COUNT:
-            bits.append(f"{len(lines)} lines (past {MEMORY_LINE_COUNT} is truncated)")
+        if dropped_lines or dropped_bytes:
+            # Lead with the consequence, not the size: these memories are
+            # silently never loaded.
+            bits.append(f"{len(lines)} lines - everything past line "
+                        f"{MEMORY_LINE_COUNT} (or 25KB) is dropped and never "
+                        "reaches Claude")
         if long_lines:
             bits.append(f"{len(long_lines)} line(s) too long")
         if orphans:
@@ -935,60 +1162,166 @@ def mcp_name_overhead(h, unused_count):
 
     We cannot enumerate an unused server's tools without connecting to it. But
     tool names of *used* servers appear in transcripts, so their observed
-    average (tools per server, chars per name) extrapolates to the idle ones.
-    An estimate with a stated basis beats 'not quantified'."""
-    per_server = collections.defaultdict(set)
-    for name in h.tool_calls:
-        if name.startswith("mcp__"):
-            parts = name.split("__")
-            if len(parts) > 2:
-                per_server[parts[1]].add(parts[2])
+    average extrapolates to the idle ones.
+
+    Two things keep this honest. The sample is drawn from ALL history, not the
+    reporting window - a 30-day window sees a handful of calls per server and
+    would learn "3 tools per server" for a server that publishes 70. And the
+    result is a RANGE: the low end is the observed average, the high end the
+    largest server actually seen. Real servers vary by an order of magnitude,
+    so a single number here is false precision.
+    """
+    per_server = {k: set(v) for k, v in h.mcp_tools_seen.items() if v}
+    if not per_server:
+        # Fall back to the windowed counter if the wider sweep found nothing.
+        per_server = collections.defaultdict(set)
+        for name in h.tool_calls:
+            if name.startswith("mcp__"):
+                parts = name.split("__")
+                if len(parts) > 2:
+                    per_server[parts[1]].add(parts[2])
+        per_server = {k: v for k, v in per_server.items() if v}
     if not per_server:
         return None
-    tools_per = sum(len(v) for v in per_server.values()) / len(per_server)
+    counts = [len(v) for v in per_server.values()]
+    tools_avg = sum(counts) / len(counts)
+    tools_max = max(counts)
     chars_per = (sum(len(t) for v in per_server.values() for t in v)
-                 / max(sum(len(v) for v in per_server.values()), 1))
-    # Observed counts are a floor: only tools actually called are visible.
-    tok = unused_count * tools_per * (chars_per / CHARS_PER_TOKEN)
-    return {"tokens": tok, "tools_per_server": round(tools_per, 1),
+                 / max(sum(counts), 1))
+    per_name_tok = chars_per / CHARS_PER_TOKEN
+    return {"tokens": unused_count * tools_avg * per_name_tok,
+            "tokens_high": unused_count * tools_max * per_name_tok,
+            "tools_per_server": round(tools_avg, 1),
+            "tools_max": tools_max,
+            "servers_sampled": len(per_server),
             "chars_per_name": round(chars_per, 1)}
 
 
 def check_mcp(configured, h, window_days=30, wmult=WRITE_MULT_1H):
-    if not configured:
-        return [Finding("A6", "Connected tools you never use", "N/A", evidence="you have no outside services connected")]
+    """A6. `configured` is the dict from mcp_servers(): only the "active" set
+    loads in this session and may be priced."""
+    if isinstance(configured, dict):
+        active = configured.get("active") or set()
+        other = configured.get("other_projects") or {}
+        needs_auth = configured.get("needs_auth") or set()
+    else:  # tolerate the old set-only signature
+        active, other, needs_auth = set(configured or ()), {}, set()
+
+    findings = []
+    if other:
+        findings.append(Finding(
+            "A6b", "Connected tools set up in other projects", "N/A",
+            evidence=f"{len(other)} server(s) configured elsewhere, not loaded here: "
+                     + ", ".join(sorted(other)[:8]),
+            why="A service attached to one project only loads in that project's "
+                "folder, and it does not carry into subfolders either. These cost "
+                "you nothing in this session, so they are listed for awareness "
+                "and not counted in the total.",
+            fix="Nothing to do unless you no longer use the project it belongs to.",
+            can_fix="NONE", doc=DOCS["mcp"]))
+
+    if not active:
+        findings.append(Finding("A6", "Connected tools you never use", "N/A",
+                                evidence="you have no outside services connected in this folder"))
+        return findings
     if not h.turns:
-        return [Finding("A6", "Connected tools you never use", "UNKNOWN",
-                        evidence="no session history to look at yet")]
-    unused = sorted(s for s in configured if s not in h.mcp_used)
+        findings.append(Finding("A6", "Connected tools you never use", "UNKNOWN",
+                                evidence="no session history to look at yet"))
+        return findings
+
+    # A6c - servers you DO use that have a free command-line equivalent.
+    swappable = []
+    for name in sorted(active & h.mcp_used):
+        cli = _cli_for(name)
+        if cli:
+            swappable.append((name, cli, shutil.which(cli) is not None))
+    if swappable:
+        # For a server we USE we do not have to extrapolate: its own tool
+        # names appear in the transcripts. Still a floor - only tools actually
+        # called are visible - but a measured one rather than an average.
+        own_tok = 0.0
+        for n, _, _ in swappable:
+            names = h.mcp_tools_seen.get(n) or set()
+            own_tok += sum(len(t) for t in names) / CHARS_PER_TOKEN
+        est_all = mcp_name_overhead(h, len(swappable))
+        if est_all and own_tok > est_all["tokens"]:
+            est_all = dict(est_all, tokens=own_tok,
+                           tokens_high=max(own_tok, est_all["tokens_high"]))
+        installed = [c for _, c, ok in swappable if ok]
+        findings.append(Finding(
+            "A6c", "Connected tools with a free command-line version", "FIX",
+            evidence="; ".join(
+                f"{n} -> {c}" + ("" if ok else f" ({c} not installed)")
+                for n, c, ok in swappable)
+            + (f" (~{fmt_tok(est_all['tokens'])}-{fmt_tok(est_all['tokens_high'])}"
+               " tokens per message est.)" if est_all else ""),
+            why="These services are connected as MCP servers, which means their "
+                "tool names sit in the list Claude carries on every message - "
+                "even when you are not using them. The same jobs can be done "
+                "with a command-line tool, which Claude simply runs when needed "
+                "and which adds nothing to every message. You are using these, "
+                "so this is a swap rather than a disconnect."
+                + (" The command-line versions are already installed on this "
+                   "machine." if installed and len(installed) == len(swappable)
+                   else ""),
+            fix="Try the command-line tool for a week - ask Claude to use "
+                + ", ".join(sorted({c for _, c, _ in swappable}))
+                + " instead. If you do not miss the server, disconnect it.",
+            can_fix="MANUAL", doc=DOCS["mcp"],
+            tokens_per_turn=est_all["tokens"] if est_all else 0,
+            monthly_usd=(overhead_monthly_usd(est_all["tokens"], h, wmult)
+                         if est_all else 0.0),
+            payload={"swaps": [{"server": n, "cli": c, "installed": ok}
+                               for n, c, ok in swappable]}))
+
+    unused = sorted(s for s in active if s not in h.mcp_used)
     if not unused:
-        return [Finding("A6", "Connected tools you never use", "PASS",
-                        evidence=f"all {len(configured)} connected services were actually used")]
+        findings.append(Finding("A6", "Connected tools you never use", "PASS",
+                                evidence=f"all {len(active)} connected services were actually used"))
+        return findings
+
     est = mcp_name_overhead(h, len(unused))
-    swaps = [f"{s} -> {CLI_ALTERNATIVES[k]}" for s in unused
-             for k in CLI_ALTERNATIVES if k in s.lower()]
+    swaps = []
     fix = ("Disconnect the servers you are not using. You can always reconnect "
            "one later if you need it.")
     if swaps:
         fix += (" These also have a command-line tool that does the same job for "
                 "free, with no always-on cost: " + ", ".join(sorted(set(swaps))))
-    return [Finding(
+
+    pending = sorted(n for n in unused if n in needs_auth)
+    if pending:
+        fix += (" " + ", ".join(pending) + " never finished signing in, so "
+                + ("they are" if len(pending) > 1 else "it is")
+                + " costing you nothing right now - either finish the sign-in "
+                  "or remove it.")
+
+    rng = ""
+    if est:
+        rng = (f" (~{fmt_tok(est['tokens'])}-{fmt_tok(est['tokens_high'])} "
+               f"tokens per message est.)")
+
+    findings.append(Finding(
         "A6", f"Connected tools not used in {window_days}d", "FIX",
-        evidence=f"{len(unused)} of {len(configured)} unused: "
-                 + ", ".join(unused[:8])
-                 + (f" (~{fmt_tok(est['tokens'])} tokens per message est.)" if est else ""),
+        evidence=f"{len(unused)} of {len(active)} unused: "
+                 + ", ".join(unused[:8]) + rng,
         why="An MCP server is an outside service you connect to Claude, like "
             "Gmail or Jira. Its tool instructions only load when needed now, but "
             "the tool names still sit in the list Claude carries on every "
             "message. Anthropic does not publish that cost, so this is our own "
             "estimate from the servers you do use"
-            + (f" ({est['tools_per_server']} tools each, "
-               f"{est['chars_per_name']} characters per name) - a floor, not a "
-               "measurement." if est else "."),
+            + (f" ({est['servers_sampled']} sampled, {est['tools_per_server']} "
+               f"tools each on average and {est['tools_max']} on the largest, "
+               f"{est['chars_per_name']} characters per name). It is a range, "
+               "not a measurement, and it is an upper bound in one more way: a "
+               "server that fails to start registers no tools and costs nothing, "
+               "which we cannot tell apart from one you simply never called."
+               if est else "."),
         fix=fix, can_fix="MANUAL", doc=DOCS["mcp"],
         tokens_per_turn=est["tokens"] if est else 0,
         monthly_usd=(overhead_monthly_usd(est["tokens"], h, wmult) if est else 0.0),
-        payload={"unused": unused})]
+        payload={"unused": unused, "needs_auth": pending,
+                 "tokens_high": est["tokens_high"] if est else 0}))
+    return findings
 
 
 def check_models(h, settings, sources):
@@ -996,7 +1329,6 @@ def check_models(h, settings, sources):
     if not h.turns:
         return [Finding("B1", "Expensive model on easy work", "UNKNOWN",
                         evidence="no session history to look at yet"),
-                Finding("B2", "Helpers using the expensive model", "UNKNOWN", evidence="no session history to look at yet"),
                 Finding("B3", "Thinking effort set to high", "UNKNOWN", evidence="no session history to look at yet")]
 
     costs, exp_turns, total_turns = {}, 0, 0
@@ -1022,7 +1354,10 @@ def check_models(h, settings, sources):
 
     model_setting = settings.get("model")
     if share > 0.4 and exp_cost > alt:
-        half = (exp_cost - alt) / 2
+        # Was (exp_cost - alt) / 2. The halving had no source and contradicted
+        # this skill's own rules: figures come from arithmetic, and category B
+        # is quoted as an upper bound. Report the bound, labelled.
+        upper = exp_cost - alt
         where = f" (set in {sources.get('model', '?')} settings)" if model_setting else ""
         findings.append(Finding(
             "B1", "Expensive model on easy work", "FIX",
@@ -1033,7 +1368,8 @@ def check_models(h, settings, sources):
                 "switches by itself, so your priciest model also handles 'rename "
                 "this variable'. The same work at Sonnet's rates would have cost "
                 + money(alt) + " - a best case, since it assumes Sonnet could "
-                "have finished it. Switch at the start of a session, not "
+                "have finished it - so treat this as the most it could save, "
+                "not a forecast. Switch at the start of a session, not "
                 "mid-way: changing model discards the cached conversation, so "
                 "all of it gets re-sent once at full price.",
             fix=("Type /model sonnet at the start of a session you know is easy"
@@ -1042,7 +1378,7 @@ def check_models(h, settings, sources):
                  + "You can also turn on a reminder that speaks up on your first "
                    "message, and only when the task clearly does not need what "
                    f'you are paying for: `python3 "{SELF_PATH}" --install-hook`'),
-            can_fix="ASSISTED", doc=DOCS["model"], monthly_usd=half,
+            can_fix="ASSISTED", doc=DOCS["model"], monthly_usd=upper,
             payload={"model_setting": model_setting,
                      "upper_bound_usd": round(exp_cost - alt, 2),
                      "action": "install_hook"}))
@@ -1050,71 +1386,133 @@ def check_models(h, settings, sources):
         findings.append(Finding("B1", "Expensive model on easy work", "PASS",
                                 evidence=f"only {share*100:.0f}% of messages used an expensive model"))
 
-    sub_env = os.environ.get("CLAUDE_CODE_SUBAGENT_MODEL")
-    if h.subagent_turns == 0:
-        findings.append(Finding("B2", "Helpers using the expensive model", "N/A",
-                                evidence="you did not use any helper subagents in this period"))
-    else:
-        pricey = sum(n for m, n in h.subagent_models.items()
-                     if any(t in m for t in EXPENSIVE_MODELS))
-        if pricey and not sub_env:
-            findings.append(Finding(
-                "B2", "Helpers using the expensive model", "FIX",
-                evidence=f"{pricey} of {h.subagent_turns} helper tasks ran on an expensive model",
-                why="A subagent is a helper Claude. It goes off, does one job - "
-                    "usually searching or reading a lot of files - and comes back "
-                    "with just the answer. Helpers use the same model as your "
-                    "main session unless you tell them not to, and searching "
-                    "rarely needs the top model.",
-                fix="Point helpers at a cheaper model by setting "
-                    "CLAUDE_CODE_SUBAGENT_MODEL=claude-sonnet-5 (or "
-                    "claude-haiku-4-5, which is cheaper still). Your main "
-                    "session is not affected.",
-                can_fix="AUTO", doc=DOCS["subagents"],
-                payload={"env": "CLAUDE_CODE_SUBAGENT_MODEL"}))
-        else:
-            findings.append(Finding(
-                "B2", "Helpers using the expensive model", "PASS",
-                evidence=f"{h.subagent_turns} helper tasks; "
-                         + (f"env set to {sub_env}" if sub_env
-                            else "already using cheaper models")))
-
+    # Effort scale, cheapest first. Claude Code's own default sits at the
+    # expensive end, so "the user never set it" is the most common costly
+    # case - not a pass. Not hardcoded as a threshold: the rule is "anything
+    # above medium", and the default is named so it can be corrected when the
+    # platform changes it.
+    EFFORT_ORDER = ["low", "medium", "high", "xhigh", "max"]
+    PLATFORM_DEFAULT_EFFORT = "xhigh"
     effort = settings.get("effortLevel")
-    if effort in ("high", "xhigh", "max"):
-        # Effort acts on reasoning/output tokens, so the output-token spend is
-        # the ceiling on what lowering it can save. Quoted as a bound, with the
-        # assumed reduction stated - not as a promise.
+    effective = effort or PLATFORM_DEFAULT_EFFORT
+    from_default = effort is None
+
+    if effective not in EFFORT_ORDER:
+        findings.append(Finding("B3", "Thinking effort above medium", "UNKNOWN",
+                                evidence=f"effort is set to '{effective}', which this "
+                                         "version does not recognise"))
+    elif EFFORT_ORDER.index(effective) <= EFFORT_ORDER.index("medium"):
+        findings.append(Finding(
+            "B3", "Thinking effort above medium", "PASS",
+            evidence=f"effort is '{effective}' - at or below medium, nothing to save here"))
+    else:
+        # Effort acts on reasoning and output tokens, so output spend is the
+        # bulk of what lowering it can reach. It also tends to produce fewer,
+        # more consolidated tool calls, so the true figure can exceed this -
+        # it is an estimate, not a ceiling.
         out_cost = 0.0
         for model, c in h.by_model.items():
             pr = price_for(model)
             if pr:
                 out_cost += c["out"] * pr[1] / 1e6
-        assumed_cut = 0.30
+        # One step down from xhigh saves more than one step down from high.
+        steps = EFFORT_ORDER.index(effective) - EFFORT_ORDER.index("medium")
+        assumed_cut = min(0.15 * steps, 0.45)
+        where = (f" (in your {sources.get('effortLevel','?')} settings)"
+                 if not from_default else
+                 " - you have not set this, so you are on Claude Code's default")
         findings.append(Finding(
-            "B3", "Thinking effort set to high", "FIX",
-            evidence=f"effort is set to '{effort}' for every session"
-                     + f" (in your {sources.get('effortLevel','?')} settings)",
+            "B3", "Thinking effort above medium", "FIX",
+            evidence=f"effort is '{effective}'{where}",
             why="Effort is how long Claude thinks before answering, and you pay "
-                "for that thinking. It is set once per session, so a high "
-                "default applies to simple jobs too. Dropping effort usually "
-                "costs less quality than dropping to a weaker model, so try it "
-                "first. The figure assumes a 30% cut on routine work; thinking "
-                "and answers cost " + money(out_cost) + " in total here, which "
-                "is the ceiling.",
-            fix="Set your default effort to medium, and raise it for the "
-                "occasional hard task that needs it.",
+                "for that thinking. It is set once per session, so it applies to "
+                "simple jobs too. Dropping effort usually costs less quality "
+                "than dropping to a weaker model, so try it first. Thinking and "
+                "answers cost " + money(out_cost) + " here; we assume a "
+                f"{int(assumed_cut*100)}% cut going from '{effective}' to "
+                "'medium', which is an estimate rather than a measurement."
+                + (" Note you are already below the default, so this is the "
+                   "second step down." if not from_default
+                      and EFFORT_ORDER.index(effective)
+                      < EFFORT_ORDER.index(PLATFORM_DEFAULT_EFFORT) else ""),
+            fix="Set your default effort to medium with /effort or in /model, "
+                "and raise it for the occasional hard task that needs it.",
             can_fix="ASSISTED", doc=DOCS["settings"],
             monthly_usd=out_cost * assumed_cut,
-            payload={"effortLevel": effort,
-                     "output_cost_ceiling_usd": round(out_cost, 2),
+            payload={"effortLevel": effective, "from_default": from_default,
+                     "output_cost_usd": round(out_cost, 2),
                      "assumed_reduction": assumed_cut}))
-    elif effort:
-        findings.append(Finding("B3", "Thinking effort set to high", "PASS",
-                                evidence=f"effort is set to '{effort}', which is not a costly default"))
-    else:
-        findings.append(Finding("B3", "Thinking effort set to high", "PASS",
-                                evidence="you have not forced a high effort default"))
     return findings
+
+
+def _check_long_sessions(h):
+    out = []
+    # Repointed twice. The original tuned autoCompactEnabled/autoCompactWindow;
+    # the docs name the real cause - "long sessions that were never cleared".
+    #
+    # SELECTION is by time spent above the line, not by peak. Peak is the size
+    # of one message's history: a session that touched 400k on its final
+    # message cost almost nothing extra, while one sitting at 300k for 400
+    # messages paid that every time. Peak ranks those two the same.
+    #
+    # PRICING uses the cache_read actually recorded for the session, which is
+    # what was really billed to carry that history, rather than anything
+    # derived from peak.
+    if not h.session_peak:
+        out.append(Finding("C2", "Long sessions never cleared", "N/A",
+                                evidence="no session sizes recorded"))
+        return out
+
+    peaks = sorted(h.session_peak.values(), reverse=True)
+    heavy = [k for k in h.session_peak
+             if h.session_high_run.get(k, 0) >= HIGH_CONTEXT_MIN_RUN]
+    if not heavy:
+        longest = max(h.session_high_run.values() or [0])
+        out.append(Finding(
+            "C2", "Long sessions never cleared", "PASS",
+            evidence=f"largest session carried ~{fmt_tok(peaks[0])} of history, "
+                     f"but never for more than {longest} message(s) in a row - "
+                     f"nothing unusual"))
+        return out
+
+    # The avoidable share of each session's re-sent history is the part above
+    # the threshold. An upper bound: some of that history was genuinely still
+    # in use, and settings alone cannot tell which. cost-coach reads the
+    # conversation and can.
+    rate_usd = blended_input_rate(h)
+    avoidable_tok = 0.0
+    for k in heavy:
+        peak = h.session_peak.get(k, 0) or 1
+        above = max(0.0, 1.0 - (HIGH_CONTEXT_TOKENS / peak))
+        avoidable_tok += h.session_cache_read.get(k, 0) * above
+    avoidable = avoidable_tok * CACHE_READ_MULT * rate_usd / 1e6
+    worst_run = max(h.session_high_run.get(k, 0) for k in heavy)
+    out.append(Finding(
+        "C2", "Long sessions never cleared", "FIX",
+        monthly_usd=avoidable,
+        evidence=f"{len(heavy)} session(s) spent long stretches carrying more "
+                 f"than {fmt_tok(HIGH_CONTEXT_TOKENS)} of history - the worst "
+                 f"ran {worst_run} messages in a row without a reset (largest "
+                 f"peaked at ~{fmt_tok(peaks[0])}); ~{fmt_tok(avoidable_tok)} "
+                 "of re-sent history is down to that extra length",
+        why="Claude re-sends the whole conversation with every message, so a "
+            "message near the end of a long chat can cost five times the same "
+            "message at the start. In a session that has been open all day, a "
+            "one-line question still carries everything said before it. This "
+            "is the biggest single cause of surprise bills in Anthropic's own "
+            "cost guidance. Read the figure as an upper bound: it assumes that "
+            "extra history was no longer being used, which settings cannot "
+            "check.",
+        fix="Type /clear when you switch to unrelated work - it starts a fresh "
+            "conversation and costs nothing. Use /rename first if you want to "
+            "find the old one again with /resume. When you do need the history "
+            "carried forward, /compact is worth it despite costing one "
+            "expensive request: it re-reads the conversation once, but every "
+            "message after it is far cheaper, so it pays for itself within a "
+            "few messages. The one time to skip it is when the session is "
+            "nearly over.",
+        can_fix="NONE", doc=DOCS["context"]))
+    return out
 
 
 def check_cache(h, settings):
@@ -1126,7 +1524,8 @@ def check_cache(h, settings):
     if not readable:
         findings.append(Finding("C1", "Paying twice for the same text", "UNKNOWN",
                                 evidence="no usage figures in this period"))
-        findings.append(Finding("C2", "Conversation trimming", "UNKNOWN", evidence="skipped - could not measure text re-use"))
+        findings.append(Finding("C2", "Long sessions never cleared", "UNKNOWN",
+                                evidence="no usage figures in this period"))
         return findings
 
     rate = reads / readable
@@ -1134,13 +1533,21 @@ def check_cache(h, settings):
         findings.append(Finding(
             "C1", "Paying twice for the same text", "PASS",
             evidence=f"{rate*100:.1f}% of your text was re-used from cache at a tenth of the price"))
-        findings.append(Finding(
-            "C2", "Conversation trimming", "N/A",
-            evidence="skipped - your text is being re-used well already, so changing this would not help"))
+        # C2 is about session length, which is independent of cache health -
+        # it must not be skipped just because C1 passed.
+        findings.extend(_check_long_sessions(h))
         return findings
 
+    # Price it. A cache write bills at 1.25x (5m) or 2x (1h) the input rate;
+    # what a read would have cost is 0.1x. The gap is the money genuinely
+    # paid a second time. Previously this row showed $0.
+    rate_usd = blended_input_rate(h)
+    repaid = sum(c["w5m"] * (WRITE_MULT_5M - CACHE_READ_MULT)
+                 + (c["w1h"] + c["w_unknown"]) * (WRITE_MULT_1H - CACHE_READ_MULT)
+                 for c in h.by_model.values()) * rate_usd / 1e6
     findings.append(Finding(
         "C1", "Paying twice for the same text", "FIX",
+        monthly_usd=repaid,
         evidence=f"{rate*100:.1f}% cache hits ({fmt_tok(reads)} read vs "
                  f"{fmt_tok(writes)} written, {fmt_tok(fresh)} uncached)",
         why="Claude re-uses the conversation so far at about a tenth of the "
@@ -1150,70 +1557,58 @@ def check_cache(h, settings):
             "context in a way that breaks the cache can cost more, not less.",
         fix="Try not to edit CLAUDE.md or your settings mid-session - finish the "
             "session first. Put the things that do not change at the start of "
-            "the conversation.",
+            "the conversation. A low figure can also just mean you work in "
+            "short sessions, which is fine and costs nothing extra. To see why "
+            "a particular session lost its cache, run /usage inside it - it "
+            "names the likely cause of the last miss.",
         can_fix="NONE", doc=DOCS["context"]))
 
-    win = settings.get("autoCompactWindow")
-    enabled = settings.get("autoCompactEnabled")
-    findings.append(Finding(
-        "C2", "Conversation trimming", "FIX",
-        evidence=f"autoCompactEnabled={enabled}, autoCompactWindow={win}",
-        why="When a conversation gets long, Claude Code summarises the older "
-            "part to make room. That is called compacting. Because you are "
-            "already paying twice for a lot of text (see the check above), "
-            "summarising sooner leaves less text to re-send each time.",
-        fix="Have a look at your autoCompactEnabled and autoCompactWindow "
-            "settings, and try summarising earlier than the default.",
-        can_fix="AUTO", doc=DOCS["settings"],
-        payload={"autoCompactWindow": win}))
+    findings.extend(_check_long_sessions(h))
     return findings
 
 
 def check_habits(h):
     findings = []
     if not h.turns:
-        return [Finding("D1", "Big searches done in the main chat", "UNKNOWN", evidence="no session history to look at yet")]
+        return [Finding("D2", "Lots of screenshots", "UNKNOWN",
+                        evidence="no session history to look at yet")]
 
     total = h.turns
-    sub_share = (h.subagent_turns + h.sidechain_turns) / total
-    if sub_share < 0.02:
-        findings.append(Finding(
-            "D1", "Big searches done in the main chat", "FIX",
-            evidence=f"{h.subagent_turns + h.sidechain_turns} of {total} turns "
-                     f"({sub_share*100:.1f}%) were handled by a helper",
-            why="When Claude searches your files in the main conversation, every "
-                "raw result stays in that conversation - and you pay for all of "
-                "it again on every message that follows. A subagent (a helper "
-                "Claude) does the same search in its own separate conversation "
-                "and hands back just the answer, so the noise never lands in "
-                "yours.",
-            fix="For anything that means digging through a lot of files, ask "
-                "Claude to use a subagent - for example: 'use a subagent to find "
-                "where X is defined'.",
-            can_fix="NONE", doc=DOCS["subagents"]))
-    else:
-        findings.append(Finding("D1", "Big searches done in the main chat", "PASS",
-                                evidence=f"{sub_share*100:.1f}% of work handed to a helper, which is healthy"))
 
+    IMAGE_TOOLS = ("computer", "screenshot", "gif_creator", "upload_image",
+                   "session_view", "get_screenshot")
     shots = sum(n for t, n in h.tool_calls.items()
-                if "computer" in t or "screenshot" in t)
+                if any(k in t.lower() for k in IMAGE_TOOLS))
+    # A Read of an image file renders it visually - the same cost as a
+    # screenshot, and previously invisible to this check.
+    shots += h.image_reads
     if shots > max(20, total * 0.05):
         # Screenshots are billed as images. ~1.5k tokens is a working figure
         # for a full-window capture; stated so the reader can discount it.
-        per_image = 1500
+        # width x height / 750. A retina window capture (1512x982) is ~2,600
+        # tokens; 1,500 assumed a much smaller image.
+        per_image = 2600
         img_tok = shots * per_image
-        img_cost = img_tok * blended_input_rate(h) / 1e6
+        # An image is paid once at the fresh-input rate, then rides in the
+        # cached prefix for the rest of its session. Charging only the entry
+        # cost - as this did - understates the very thing the text warns about.
+        turns_per_session = h.turns / max(len(h.sessions), 1)
+        carried = max(0.0, turns_per_session / 2)  # average: mid-session
+        rate_usd = blended_input_rate(h)
+        img_cost = img_tok * rate_usd / 1e6
+        img_cost += img_tok * carried * CACHE_READ_MULT * rate_usd / 1e6
         findings.append(Finding(
             "D2", "Lots of screenshots", "FIX",
             evidence=f"{shots} screenshot/computer-use calls "
-                     f"(~{fmt_tok(img_tok)} image tokens at ~{per_image}/image)",
+                     f"(~{fmt_tok(img_tok)} image tokens at ~{per_image}/image, "
+                     f"each then carried through ~{carried:.0f} later messages)",
             monthly_usd=img_cost,
             why="A screenshot goes into the conversation as a picture. One "
                 "picture costs far more than a line of text, and it stays in the "
                 "conversation from then on, so you keep paying for it. We "
-                "estimate about 1,500 tokens per screenshot - that is a rule of "
-                "thumb, not a measurement, because the exact count per image is "
-                "not recorded.",
+                "estimate about 2,600 tokens per screenshot, from its pixel "
+                "size - a rule of thumb, not a measurement, because the exact "
+                "count per image is not recorded.",
             fix="When you only need to know what a page says, ask Claude to read "
                 "the page text or the error log instead of taking a picture. Keep "
                 "screenshots for when you actually need to see the layout.",
@@ -1232,9 +1627,12 @@ def check_habits(h):
             evidence=f"{h.dup_reads} files were read again after Claude already had them"
                      + (f", adding ~{fmt_tok(dup_tok)} tokens back into the conversation" if dup_tok else ""),
             monthly_usd=dup_cost,
-            why="Every time a file is read, a full copy of it is added to the "
+            why="Every time a file is read, a copy of it is added to the "
                 "conversation. The first copy does not go away - so now you are "
-                "paying for both, on every message that follows.",
+                "paying for both, on every message that follows. Read this as "
+                "an upper bound: re-reading a file that changed in between is "
+                "the right thing to do, and we cannot tell those apart. Sizes "
+                "are also measured today, not when the read happened.",
             fix="Mostly this is Claude's habit, not yours. If you see it "
                 "re-reading a file it already has, say so: 'you already read "
                 "that file, use what you have'.",
@@ -1243,31 +1641,6 @@ def check_habits(h):
         findings.append(Finding("D3", "Reading the same file twice", "PASS",
                                 evidence=f"{h.dup_reads} files read more than once - not enough to matter"))
 
-    if h.denials > max(10, total * 0.02):
-        # A denied call is billed, then the retry is billed again. Cost per
-        # denial approximates one average turn's input.
-        per_turn = 0.0
-        priced = sum(v for m, c in h.by_model.items()
-                     for v in [model_cost(m, c)] if v is not None)
-        if h.turns:
-            per_turn = priced / h.turns
-        findings.append(Finding(
-            "D4", "Blocked commands, then retried", "FIX",
-            evidence=f"~{h.denials} times you declined a command Claude wanted to run"
-                     + (f", at roughly {money(per_turn)} of wasted spend each" if per_turn else ""),
-            monthly_usd=h.denials * per_turn,
-            why="When you say no to a command, you have already paid for Claude's "
-                "attempt. Then you pay again for whatever it tries instead. "
-                "Approving the safe commands once, up front, removes both "
-                "charges - and stops the interruptions.",
-            fix="Add the commands you always end up approving to "
-                "'permissions.allow' in your settings, so Claude stops asking. "
-                "Start with read-only ones like 'ls' or 'git status' - they "
-                "cannot change anything.",
-            can_fix="MANUAL", doc=DOCS["settings"]))
-    else:
-        findings.append(Finding("D4", "Blocked commands, then retried", "PASS",
-                                evidence=f"~{h.denials} commands declined - not enough to matter"))
     return findings
 
 
@@ -1302,6 +1675,43 @@ def parse_since(since_iso, window_days):
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=dt.timezone.utc)
     return parsed
+
+
+def calibration_status_payload(saved):
+    """What --calibration-status returns. The skill acts on `action`; the
+    `how_to_find_it` block is what it should read out when asking, so the
+    user is not left guessing which number on which screen."""
+    managed = model_pricing_setting()
+    if saved and not saved.get("stale"):
+        action = "proceed"
+    elif saved:
+        action = "ask_user_refresh"
+    else:
+        action = "proceed_managed_rates" if managed else "ask_user"
+    out = {
+        "calibrated": bool(saved),
+        "actual_spend": (saved or {}).get("actual_spend"),
+        "spend_since": (saved or {}).get("spend_since"),
+        "age_days": (saved or {}).get("age_days"),
+        "stale": bool((saved or {}).get("stale")),
+        "action": action,
+    }
+    if managed:
+        out["managed_model_pricing"] = managed
+    if action in ("ask_user", "ask_user_refresh"):
+        out["ask_user_for"] = [
+            "amount billed so far this period",
+            "date the period started (--spend-since)",
+            "time you read it (--spend-asof), so the factor does not drift",
+        ]
+        out["how_to_find_it"] = {
+            "pro_max": "/usage-credits, or claude.ai > Settings > Usage > "
+                       "Usage credits",
+            "team_enterprise": "claude.ai > Admin settings > Usage, or the "
+                               "org spend report from your admin",
+            "api_console": "platform.claude.com/usage",
+        }
+    return out
 
 
 def load_calibration_config():
@@ -1353,6 +1763,64 @@ def parse_asof(value):
     return parsed
 
 
+CALIBRATION_HELP = [
+    "  To correct them I need three things, all on one screen:",
+    "    1. what you have been billed so far this period",
+    "    2. the date that period started",
+    "    3. the time you read it (so the figure does not drift later)",
+    "  Where to look, depending on your plan:",
+    "    Pro / Max          type /usage-credits, or claude.ai -> Settings ->",
+    "                       Usage -> Usage credits ('$X of $Y spent')",
+    "    Team / Enterprise  claude.ai -> Admin settings -> Usage, or ask your",
+    "                       admin for the org spend report (per-user, daily)",
+    "    API / Console      platform.claude.com/usage",
+    "  Then re-run with, for example:",
+    "    --actual-spend 120.00 --spend-since 2026-09-01 "
+    "--spend-asof 2026-09-19T14:00",
+]
+
+
+def model_pricing_setting():
+    """Contracted rates an admin may already have published.
+
+    Better than asking the user for a number off a screen: `modelPricing` is
+    a managed setting carrying the organisation's real rates, and Claude Code
+    itself uses it for the figures in /usage. If it is present there is
+    nothing to calibrate against - we are already on the right prices."""
+    for path in ("/Library/Application Support/ClaudeCode/managed-settings.json",
+                 "/etc/claude-code/managed-settings.json",
+                 os.path.join(CLAUDE_DIR, "managed-settings.json")):
+        data = read_json(path)
+        if isinstance(data, dict) and data.get("modelPricing"):
+            return path
+    return None
+
+
+def observed_days(h, window_days):
+    """How many days of history the figures actually rest on.
+
+    `h.turns`, `h.by_model` and `h.sessions` are all window-scoped, so every
+    figure built from them is a total for the period observed - not a month.
+    If the machine only has 9 days of transcripts, a 30-day window observed
+    9 days, and projecting as though it saw 30 would triple the answer."""
+    span = h.span_days or 0
+    days = min(window_days, span) if span else window_days
+    return max(1.0, float(days))
+
+
+def normalize_to_month(findings, h, window_days):
+    """Scale window totals to a 30-day month.
+
+    Nothing in this script did this: every `monthly_usd` was a total for the
+    audit window, printed under a "/mo" label. At the documented `--days 7`
+    that understated by roughly 4x."""
+    days = observed_days(h, window_days)
+    factor = 30.0 / days
+    for f in findings:
+        f.monthly_usd *= factor
+    return {"observed_days": round(days, 1), "factor": round(factor, 3)}
+
+
 def calibrate(findings, h, actual_spend, cal_since=None, cal_until=None):
     """Scale dollar figures so the billing-period total matches a real amount.
 
@@ -1374,7 +1842,7 @@ def calibrate(findings, h, actual_spend, cal_since=None, cal_until=None):
             "calibration_turns": sum(c["turns"] for c in h.cal_by_model.values())}
 
 
-def render(findings, h, version, window_days, warnings, cal=None):
+def render(findings, h, version, window_days, warnings, cal=None, norm=None):
     lines = []
     total = sum(v for m, c in h.by_model.items()
                 for v in [model_cost(m, c)] if v is not None)
@@ -1390,12 +1858,20 @@ def render(findings, h, version, window_days, warnings, cal=None):
 
     if cal:
         total *= cal["factor"]
+    # The findings are per-month; the spend they are measured against has to
+    # be too, or "save $227/mo" sits next to "$200 spent" and the percentage
+    # underneath it is nonsense.
+    if norm:
+        total *= norm["factor"]
     fixes = [f for f in findings if f.status == "FIX"]
     passes = [f for f in findings if f.status == "PASS"]
     identified_t = sum(f.monthly_usd for f in fixes)
     score_t = round(len(passes) / max(len(findings), 1) * 100)
     lines.append(f"COST INSPECTOR - claude-code {version or 'unknown'} - "
                  f"{len(h.sessions)} sessions - last {window_days} days")
+    if norm and norm["observed_days"] < 29:
+        lines.append(f"  (monthly figures projected from {norm['observed_days']} "
+                     "days of history - a short window magnifies a busy week)")
     lines.append(BAR)
     if identified_t:
         lines.append(f"  YOU COULD SAVE   {money(identified_t)}/mo"
@@ -1418,8 +1894,15 @@ def render(findings, h, version, window_days, warnings, cal=None):
     else:
         lines.append("  ** These are public list prices, usually ~1.8x higher than a "
                      "real bill **")
-        lines.append("  Tell me what you were actually billed and I will correct "
-                     "every figure, and remember it.")
+        managed = model_pricing_setting()
+        if managed:
+            lines.append("  Your organisation has published its contracted rates in "
+                         "managed settings,")
+            lines.append(f"  so these may already be close: {_short(managed)}")
+        else:
+            lines.append("  Tell me what you were actually billed and I will correct "
+                         "every figure, and remember it.")
+            lines.extend(CALIBRATION_HELP)
     lines.append("")
     lines.append(f"  {len(passes)} of {len(findings)} checks passed"
                  f"{'':<20}{len(fixes)} things worth fixing")
@@ -1494,13 +1977,15 @@ def _apply_cmd(ids):
     return f'python3 "{SELF_PATH}" --apply {ids}'
 
 
-def render_markdown(findings, h, version, window_days, warnings, cal, ref):
+def render_markdown(findings, h, version, window_days, warnings, cal, ref, norm=None):
     """Markdown twin of render(). The terminal wants fixed-width columns; a
     saved .md file wants real markdown, not ASCII art with a renamed suffix."""
     total = sum(v for m, c in h.by_model.items()
                 for v in [model_cost(m, c)] if v is not None)
     if cal:
         total *= cal["factor"]
+    if norm:
+        total *= norm["factor"]
     overhead = sum(f.tokens_per_turn for f in findings if f.status == "FIX")
     reads = sum(c["cache_read"] for c in h.by_model.values())
     writes = sum(c["w5m"] + c["w1h"] + c["w_unknown"] for c in h.by_model.values())
@@ -1693,13 +2178,13 @@ def _wrap(text, width):
 def referral(findings, h):
     """One line, evidence-based, and willing to say don't."""
     signals = [f.id for f in findings
-               if f.id in ("D1", "D2", "D3") and f.status == "FIX"]
+               if f.id in ("D2", "D3") and f.status == "FIX"]
     peak = _forecast_coach_cost(h)
     if not signals:
         return {"recommended": False,
                 "reason": "session patterns look efficient",
                 "signals": [], "forecast_usd": peak}
-    names = {"D1": "low subagent use", "D2": "heavy screenshot use",
+    names = {"D2": "heavy screenshot use",
              "D3": "repeated file reads"}
     return {"recommended": True,
             "reason": "; ".join(names[s] for s in signals),
@@ -1837,16 +2322,6 @@ def apply_fix(finding, settings_path):
                     done.append(f"disabled plugin: {key}")
         if changed:
             _save_json(settings_path, data)
-    elif finding.id == "C2":
-        data = read_json(settings_path) or {}
-        if os.path.exists(settings_path):
-            backup(settings_path)
-        data["autoCompactEnabled"] = True
-        _save_json(settings_path, data)
-        done.append("set autoCompactEnabled=true")
-    elif finding.id == "B2":
-        done.append("B2 needs an env var in your shell profile: "
-                    "export CLAUDE_CODE_SUBAGENT_MODEL=claude-sonnet-5")
     return done or [f"{finding.id}: nothing to change"]
 
 
@@ -1894,28 +2369,17 @@ def main():
     args = ap.parse_args()
 
     if args.calibration_status:
-        saved = load_calibration_config()
-        if not saved:
-            print(json.dumps({
-                "calibrated": False,
-                "action": "ask_user",
-                "prompt": "Ask the user for their actual Claude Code spend and "
-                          "the date the billing period started, then re-run "
-                          "with --actual-spend and --spend-since. Without it "
-                          "every dollar figure is a list-price estimate, "
-                          "typically ~1.8x too high.",
-                "where_to_find": "their Claude usage/limits panel shows "
-                                 "'$X of $Y spent' and the reset date",
-            }, indent=2))
-        else:
-            print(json.dumps({
-                "calibrated": True,
-                "actual_spend": saved.get("actual_spend"),
-                "spend_since": saved.get("spend_since"),
-                "age_days": saved.get("age_days"),
-                "stale": saved.get("stale", False),
-                "action": ("ask_user_refresh" if saved.get("stale") else "proceed"),
-            }, indent=2))
+        payload = calibration_status_payload(load_calibration_config())
+        if payload["action"].startswith("ask_user"):
+            payload["prompt"] = (
+                "Ask the user for the amount billed so far this period, the date "
+                "the period started, and the time they read it, then re-run with "
+                "--actual-spend, --spend-since and --spend-asof. Read out the "
+                "how_to_find_it entry that matches their plan - do not just say "
+                "'your usage panel'. Without this every dollar figure is a "
+                "list-price estimate, typically ~1.8x too high.")
+        print(json.dumps(payload, indent=2))
+        return 0
         return 0
 
     cwd = os.getcwd()
@@ -1938,7 +2402,7 @@ def main():
     settings, sources = load_settings(cwd)
     skills = scan_skills()
     md = scan_claude_md(cwd)
-    servers = mcp_servers()
+    servers = mcp_servers(cwd)
     # Calibration is remembered: without this, the next plain run reports an
     # uncalibrated list-price figure even though the user already gave a real
     # one - which is how a ~2x-inflated number lands back on screen.
@@ -1981,7 +2445,7 @@ def main():
     wmult = dominant_write_mult(h)
     findings = []
     elsewhere = other_project_claude_md(cwd, h.cwds)
-    findings += check_claude_md(md, h, wmult, elsewhere)
+    findings += check_claude_md(md, h, wmult, elsewhere, cwd)
     findings += check_skills(skills, h, args.days, wmult,
                              settings.get("enabledPlugins"))
     findings += check_memory(cwd, h, wmult)
@@ -1990,6 +2454,10 @@ def main():
     findings += check_cache(h, settings)
     findings += check_habits(h)
 
+    # Order is irrelevant (both are scalar multipliers) but normalisation
+    # must not touch the calibration estimate, which is compared against a
+    # real bill for a real period.
+    norm = normalize_to_month(findings, h, args.days)
     cal = calibrate(findings, h, actual_spend, cal_since, cal_until)
     ref = referral(findings, h)
     path = write_findings(findings, h, version, args.days, ref, cal)
@@ -2011,7 +2479,7 @@ def main():
                           "referral": ref, "warnings": warnings}, indent=2))
         return 0
 
-    report = render(findings, h, version, args.days, warnings, cal)
+    report = render(findings, h, version, args.days, warnings, cal, norm)
     tail = []
     if ref["recommended"]:
         tail.append(f"  Worth a deeper look ({ref['reason']}). The companion "
@@ -2028,7 +2496,7 @@ def main():
     print(f"  Findings written to {os.path.abspath(path)}")
     if not args.no_report:
         dest = args.report or REPORT_PATH
-        md = render_markdown(findings, h, version, args.days, warnings, cal, ref)
+        md = render_markdown(findings, h, version, args.days, warnings, cal, ref, norm)
         try:
             os.makedirs(os.path.dirname(os.path.abspath(dest)), exist_ok=True)
             with open(dest, "w", encoding="utf-8") as fh:

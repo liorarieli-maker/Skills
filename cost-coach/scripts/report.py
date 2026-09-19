@@ -29,19 +29,16 @@ SEVERITY_LABEL = {
 # title and a one-line explanation of the pattern itself.
 LENS_TITLES = {
     "vague-opening": "The request was not clear enough at the start",
-    "rework-loop": "The same work was done more than once",
     "model-mismatch": "An expensive model did simple work",
     "missed-delegation": "A big search ran in the main conversation",
     "context-churn": "A new subject started in the same conversation",
     "tool-thrash": "The same kind of action repeated many times",
-    "abandoned-work": "A session cost a lot and produced nothing",
+    "bloated-session": "The conversation ran long and expensive",
 }
 
 LENS_BLURB = {
     "vague-opening": "An unclear first message means Claude asks again or "
                      "builds the wrong thing - you pay for both.",
-    "rework-loop": "Work that gets built, undone, then rebuilt is paid for "
-                   "every time.",
     "model-mismatch": "The model is fixed when a session starts, so the "
                       "expensive one also handles the easy parts.",
     "missed-delegation": "Search results left in the main conversation get paid "
@@ -52,8 +49,10 @@ LENS_BLURB = {
                      "you.",
     "tool-thrash": "Many small repeated actions cost far more than one batched "
                    "action.",
-    "abandoned-work": "Sessions that end with nothing kept are the most "
-                      "expensive kind.",
+    "bloated-session": "Every message re-sends the whole conversation, so the "
+                       "longer a chat runs the more each new message costs - "
+                       "and once the early part is no longer being used, that "
+                       "is money spent carrying nothing.",
 }
 
 

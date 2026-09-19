@@ -1,6 +1,6 @@
 ---
 name: cost-coach
-description: Read a few of the user's own past Claude Code conversations and tell them, in plain language, which of their habits cost money - unclear first requests, work that got redone, an expensive model doing simple jobs, big searches left in the main conversation, changing subject without starting fresh, the same action repeated many times, sessions that cost a lot and produced nothing. Every point quotes the real moment it came from. Use when the user asks how to work more efficiently, wants feedback on how they use Claude Code, asks what they are doing wrong, or asks for a review of their sessions. This skill reads actual conversation content, so it always asks permission and states the cost first.
+description: Read a few of the user's own past Claude Code conversations and tell them, in plain language, which of their habits cost money - unclear first requests, an expensive model doing simple jobs, big searches left in the main conversation, changing subject without starting fresh, the same action repeated many times, conversations left to run long and expensive. Every point quotes the real moment it came from. Use when the user asks how to work more efficiently, wants feedback on how they use Claude Code, asks what they are doing wrong, or asks for a review of their sessions. This skill reads actual conversation content, so it always asks permission and states the cost first.
 disable-model-invocation: true
 ---
 
@@ -112,12 +112,47 @@ any that cannot be evidenced.
 | `lens` key | Looks for |
 |---|---|
 | `vague-opening` | Requests needing several clarification rounds before work started |
-| `rework-loop` | The same file or feature revisited after being called done |
 | `model-mismatch` | Expensive model used for turns that turned out mechanical |
 | `missed-delegation` | Long research stretches in the main thread a subagent would have isolated |
 | `context-churn` | Subject changes with no break, so unrelated context is carried and re-paid |
 | `tool-thrash` | Repeated near-identical calls; whole files read to use a few lines |
-| `abandoned-work` | Sessions that consumed a lot and produced nothing landed |
+| `bloated-session` | The moment a long conversation stopped needing its own history, and kept paying for it |
+
+**`missed-delegation` and `tool-thrash` overlap, so draw the line by the
+question each answers.** `missed-delegation`: the work was reasonable, it just
+happened in the wrong place - hand it to a helper. `tool-thrash`: the work
+itself was wasteful and should not be done that way anywhere. **One run of
+actions that matches both is reported as `missed-delegation` only.** Reporting
+it twice charges the user's attention for the same dollar and makes the whole
+report look padded.
+
+**`bloated-session` overlaps with `cost-inspector`'s `C2`, and the split is
+the whole reason both skills exist.** `C2` can measure that a session carried a
+large conversation for hundreds of messages, and price it - but it has to
+assume all of that history was dead weight, because it never reads a word. Its
+figure is an upper bound.
+
+This skill can actually tell. So **do not re-report the number** - the user
+already has it, for free, from a skill that did not cost them $4. Report the
+thing only reading can find: **the moment the old material stopped being
+used.** A finding here names where the session should have been reset and what
+was still live at that point, and it is worth writing only if it can.
+
+Concretely:
+
+- The `excerpt` is the turn where the subject or the task actually changed -
+  the last message that needed what came before it.
+- `what_it_cost` describes what was carried past that point, in plain terms.
+  Quote `carried_usd` from the manifest only as "about", and only if the
+  extract supports the claim that the history really was dead.
+- **Contradicting `C2` is a good outcome.** "Your longest session stayed big
+  because you were genuinely still working on the same thing - there was no
+  good moment to clear it" is a real, useful finding. Say it plainly.
+- `select.py` returns `high_context_turns`, `longest_high_context_run`,
+  `carried_usd` and `bloated` per session from metadata alone. Take the
+  arithmetic from there; never recount it in the extract.
+- A long run at the very end of a session is not worth flagging - clearing out
+  only pays off if substantial work followed.
 
 These keys are internal. `report.py` turns each one into a plain-language
 heading and explains the pattern for the reader — so **never put the key, or a
@@ -148,8 +183,8 @@ JSON in this shape, then render it with `report.py`:
 }
 ```
 
-`lens` values: `vague-opening`, `rework-loop`, `model-mismatch`,
-`missed-delegation`, `context-churn`, `tool-thrash`, `abandoned-work`.
+`lens` values: `vague-opening`, `model-mismatch`, `missed-delegation`,
+`context-churn`, `tool-thrash`, `bloated-session`.
 
 **The schema enforces the evidence rule.** `report.py` requires `lens`,
 `session_id`, `excerpt`, `what_it_cost` and `do_differently`. Any finding
@@ -183,7 +218,9 @@ Applies to `what_it_cost` and `do_differently`, which are printed verbatim:
   a time, about 160 times, when it could have done them in groups."
 - **Name the thing, then use it.** First mention of anything Claude Code
   specific gets three words of explanation: "a subagent (a helper Claude that
-  does one job and reports back)". Prefer "helper" after that.
+  does one job and reports back)". Prefer "helper" after that. Same for
+  compacting: "compacting (Claude summarises the old part of the chat so you
+  stop paying for it)" - never assume they know the word.
 - **No internal vocabulary.** Not: turn, context window, thrash, churn, lens,
   token bloat, tool call, prompt engineering, transcript, schema. Say: message,
   the conversation so far, repeated, cost, question.
