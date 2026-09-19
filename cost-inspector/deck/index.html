@@ -1,0 +1,1077 @@
+<!doctype html><html><head><meta charset=utf8><meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover"><style>:root{color-scheme:light;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}html{scroll-padding-top:env(safe-area-inset-top,0px)}body{margin:0;padding:0;font:14px -apple-system,BlinkMacSystemFont,sans-serif;background:#faf9f5;color:#141413}img{max-width:100%}[hidden]:not([hidden=until-found i]){display:none!important}</style></head><body>
+<title>Claude Code Cost Audit</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;700;800&family=Source+Sans+3:wght@400;600&family=JetBrains+Mono:wght@400;700&display=swap">
+<style>
+  :root {
+    --paper: #F7F8F7;
+    --panel: #FFFFFF;
+    --ink: #14181C;
+    --slate: #646E72;
+    --rule: #DCE0DD;
+    --credit: #1F7A4D;
+    --credit-soft: #E6F0E9;
+    --warn: #A85F1B;
+    --warn-soft: #F6EADC;
+
+    --display: 'Archivo', 'Helvetica Neue', Arial, sans-serif;
+    --body: 'Source Sans 3', system-ui, sans-serif;
+    --mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --paper: #101417;
+      --panel: #171C20;
+      --ink: #EDF0EE;
+      --slate: #949E9F;
+      --rule: #2A3136;
+      --credit: #5FBE8B;
+      --credit-soft: #17301F;
+      --warn: #D99A4E;
+      --warn-soft: #2E2416;
+    }
+  }
+  :root[data-theme="dark"] {
+    --paper: #101417;
+    --panel: #171C20;
+    --ink: #EDF0EE;
+    --slate: #949E9F;
+    --rule: #2A3136;
+    --credit: #5FBE8B;
+    --credit-soft: #17301F;
+    --warn: #D99A4E;
+    --warn-soft: #2E2416;
+  }
+
+  html, body { height: 100%; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--body);
+    font-size: 18px;
+    line-height: 1.55;
+    margin: 0;
+    -webkit-font-smoothing: antialiased;
+  }
+  * { box-sizing: border-box; }
+
+  .deck { height: 100%; display: flex; flex-direction: column; }
+
+  .slide {
+    display: none;
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    padding: 32px 24px 16px;
+  }
+  .slide.active { display: block; }
+  .inner { max-width: 940px; margin: 0 auto; }
+
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 12.5px;
+    font-weight: 700;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--slate);
+    margin: 0 0 14px;
+  }
+  h1, h2 {
+    font-family: var(--display);
+    font-weight: 800;
+    letter-spacing: -0.022em;
+    text-wrap: balance;
+    margin: 0 0 18px;
+  }
+  h1 { font-size: clamp(33px, 6vw, 60px); line-height: 1.04; }
+  h2 { font-size: clamp(26px, 3.9vw, 40px); line-height: 1.1; }
+  .lede {
+    font-size: clamp(18px, 1.9vw, 22px);
+    color: var(--slate);
+    max-width: 58ch;
+    margin: 0 0 26px;
+  }
+  strong { font-weight: 600; color: var(--ink); }
+  .num { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+
+  /* receipt-style figure block */
+  .receipt {
+    background: var(--panel);
+    border: 1px solid var(--rule);
+    padding: 18px 20px;
+    max-width: 500px;
+  }
+  .receipt-row {
+    display: flex; justify-content: space-between; gap: 18px;
+    padding: 7px 0;
+    font-family: var(--mono);
+    font-size: 15px;
+    font-variant-numeric: tabular-nums;
+    border-bottom: 1px dotted var(--rule);
+  }
+  .receipt-row:last-child { border-bottom: 0; }
+  .receipt-row .amt { font-weight: 700; }
+  .receipt-row.total {
+    border-top: 2px solid var(--ink);
+    border-bottom: 0;
+    margin-top: 6px;
+    padding-top: 12px;
+    font-size: 17px;
+  }
+  .receipt-row.total .amt { color: var(--credit); }
+  .strike { color: var(--slate); text-decoration: line-through; }
+
+  .two { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+  @media (max-width: 720px) { .two { grid-template-columns: 1fr; } }
+
+  .col { border-top: 3px solid var(--ink); padding-top: 14px; }
+  .col.coach { border-top-color: var(--warn); }
+  .col h3 {
+    font-family: var(--display); font-size: 21px; font-weight: 700;
+    margin: 0 0 3px;
+  }
+  .col .role {
+    font-family: var(--mono); font-size: 12px; letter-spacing: .08em;
+    text-transform: uppercase; color: var(--slate); margin: 0 0 13px;
+  }
+  .col p { margin: 0 0 13px; font-size: 17px; }
+
+  ul.plain { list-style: none; padding: 0; margin: 0; }
+  ul.plain li {
+    padding: 8px 0 8px 0;
+    border-bottom: 1px solid var(--rule);
+    font-size: 17px;
+    display: flex; gap: 13px; align-items: baseline;
+  }
+  ul.plain li:last-child { border-bottom: 0; }
+  .tag {
+    font-family: var(--mono); font-size: 11.5px; font-weight: 700;
+    letter-spacing: .06em; padding: 3px 7px; white-space: nowrap;
+    border: 1px solid var(--rule); color: var(--slate);
+  }
+  .tag.yes { color: var(--credit); border-color: var(--credit); }
+  .tag.ask { color: var(--warn); border-color: var(--warn); }
+
+  .groups { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; }
+  @media (max-width: 760px) { .groups { grid-template-columns: repeat(2, 1fr); } }
+  .group { border-left: 2px solid var(--rule); padding-left: 12px; }
+  .group .k {
+    font-family: var(--mono); font-size: 12px; font-weight: 700;
+    color: var(--credit); letter-spacing: .08em;
+  }
+  .group .t { font-weight: 600; font-size: 16px; margin: 3px 0 7px; }
+  .group .d { font-size: 15.5px; color: var(--slate); line-height: 1.45; }
+
+  /* Which skill a slide is about. Colour matches the columns on slide 2:
+     ink = inspector, amber = coach. */
+  .gates { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 16px; }
+  .gate {
+    font-family: var(--mono); font-size: 13px; font-weight: 700;
+    letter-spacing: .04em;
+    padding: 5px 11px 5px 10px;
+    border: 1px solid var(--rule);
+    border-left-width: 4px;
+    background: var(--panel);
+    color: var(--slate);
+    white-space: nowrap;
+  }
+  .gate.on { color: var(--ink); }
+  .gate.inspector { border-left-color: var(--ink); }
+  .gate.coach { border-left-color: var(--warn); }
+  .gate.coach.on { color: var(--warn); }
+  .gate.off { opacity: .34; }
+
+  /* Slides 7-8: the real reports, folded into openable rows. Colour carries
+     the status so the eye can sort it before reading any of it:
+     amber = needs attention, green = fine, grey = context. */
+  .doc {
+    background: var(--panel);
+    border: 1px solid var(--rule);
+    padding: 20px 22px;
+    font-size: 14.5px;
+    line-height: 1.5;
+  }
+  .doc-head {
+    display: flex; justify-content: space-between; align-items: flex-end;
+    gap: 20px; flex-wrap: wrap;
+    padding-bottom: 14px; margin-bottom: 15px;
+    border-bottom: 2px solid var(--ink);
+  }
+  .fig-big {
+    font-family: var(--mono); font-weight: 700; font-size: 35px;
+    color: var(--credit); line-height: 1; letter-spacing: -.02em;
+    font-variant-numeric: tabular-nums;
+  }
+  .fig-big.warnfig { color: var(--warn); }
+  .fig-big span { font-size: .4em; color: var(--slate); font-weight: 400; }
+  .fig-sub { font-size: 13px; color: var(--slate); margin: 6px 0 0; }
+  .score { font-family: var(--mono); text-align: right; font-size: 12px;
+           color: var(--slate); }
+  .score b { display: block; font-size: 23px; color: var(--ink);
+             font-variant-numeric: tabular-nums; }
+  .score b span { font-size: .55em; color: var(--slate); font-weight: 400; }
+
+  .startline {
+    border-left: 3px solid var(--warn); background: var(--warn-soft);
+    padding: 9px 13px; font-size: 14px; margin: 0 0 14px;
+  }
+  .legend {
+    display: flex; gap: 16px; flex-wrap: wrap; align-items: center;
+    font-family: var(--mono); font-size: 10.5px; letter-spacing: .07em;
+    text-transform: uppercase; color: var(--slate); margin: 0 0 11px;
+  }
+  .legend i {
+    display: inline-block; width: 9px; height: 9px; border-radius: 50%;
+    margin-right: 6px; vertical-align: middle;
+  }
+  .legend i.w { background: var(--warn); }
+  .legend i.m { background: var(--warn); opacity: .5; }
+  .legend i.o { background: var(--credit); }
+
+  details.f {
+    border: 1px solid var(--rule); border-left-width: 4px;
+    background: var(--paper); margin-bottom: 6px;
+  }
+  details.f.warn { border-left-color: var(--warn); }
+  details.f.mid  { border-left-color: var(--warn); opacity: .92; }
+  details.f.ok   { border-left-color: var(--credit); }
+  details.f.neu  { border-left-color: var(--slate); }
+  details.f > summary {
+    cursor: pointer; list-style: none;
+    padding: 10px 13px;
+    display: flex; gap: 12px; align-items: baseline; flex-wrap: wrap;
+  }
+  details.f > summary::-webkit-details-marker { display: none; }
+  details.f > summary:hover { background: var(--panel); }
+  details.f[open] > summary { border-bottom: 1px solid var(--rule); }
+  .f-title { font-weight: 600; flex: 1 1 auto; min-width: 12ch; }
+  .f-amt {
+    font-family: var(--mono); font-weight: 700; color: var(--warn);
+    font-variant-numeric: tabular-nums; white-space: nowrap;
+  }
+  details.f.ok .f-amt, details.f.neu .f-amt { color: var(--credit); }
+  .f-who {
+    font-family: var(--mono); font-size: 11px; color: var(--slate);
+    white-space: nowrap; letter-spacing: .04em;
+  }
+  details.f > summary::after {
+    content: '+'; font-family: var(--mono); font-weight: 700;
+    color: var(--slate); width: 1ch; text-align: center;
+  }
+  details.f[open] > summary::after { content: '\2212'; }
+  .f-body { padding: 13px; font-size: 13.8px; }
+  .f-body > p:last-child { margin-bottom: 0; }
+  .why { color: var(--slate); }
+
+  .doc p { margin: 0 0 9px; }
+  .doc table { width: 100%; border-collapse: collapse; margin: 0 0 9px; }
+  .doc th, .doc td {
+    text-align: left; padding: 5px 9px 5px 0;
+    border-bottom: 1px solid var(--rule); vertical-align: top;
+  }
+  .doc tr:last-child td { border-bottom: 0; }
+  .doc th {
+    font-family: var(--mono); font-size: 10.5px; font-weight: 700;
+    letter-spacing: .06em; text-transform: uppercase; color: var(--slate);
+  }
+  .doc td.amt {
+    font-family: var(--mono); font-weight: 700; white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+  }
+  .doc td.st {
+    font-family: var(--mono); font-size: 11px; white-space: nowrap;
+    letter-spacing: .05em; text-transform: uppercase; font-weight: 700;
+  }
+  .doc td.st.ok { color: var(--credit); }
+  .doc td.st.neu { color: var(--slate); }
+  .doc .quote {
+    border-left: 3px solid var(--rule); padding: 3px 0 3px 13px;
+    color: var(--slate); margin: 0 0 10px;
+  }
+  .doc pre {
+    font-family: var(--mono); font-size: 12px; margin: 0 0 10px;
+    padding: 9px 11px; background: var(--panel);
+    border: 1px solid var(--rule); overflow-x: auto;
+  }
+  .doc .lbl { font-weight: 600; color: var(--ink); }
+  .doc .foot {
+    margin: 16px 0 0; padding-top: 12px; border-top: 1px solid var(--rule);
+    color: var(--slate); font-style: italic; font-size: 13px;
+  }
+
+  .callout {
+    border-left: 3px solid var(--warn);
+    background: var(--warn-soft);
+    padding: 15px 18px;
+    font-size: 16.5px;
+    max-width: 62ch;
+  }
+  .callout.good { border-left-color: var(--credit); background: var(--credit-soft); }
+
+  .bignum {
+    font-family: var(--mono); font-weight: 700;
+    font-size: clamp(38px, 7vw, 68px);
+    color: var(--credit); letter-spacing: -0.03em;
+    font-variant-numeric: tabular-nums;
+    line-height: 1;
+  }
+  .bigsub { font-size: 16px; color: var(--slate); margin-top: 6px; }
+
+  /* nav */
+  .bar {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 16px;
+    border-top: 1px solid var(--rule);
+    padding: 10px 24px;
+    padding-bottom: calc(10px + env(safe-area-inset-bottom, 0px));
+    background: var(--paper);
+  }
+  .dots { display: flex; gap: 7px; }
+  .dot {
+    width: 9px; height: 9px; padding: 0; border-radius: 50%;
+    border: 1px solid var(--slate); background: transparent;
+    cursor: pointer;
+  }
+  .dot[aria-current="true"] { background: var(--ink); border-color: var(--ink); }
+  .dot:focus-visible, .nav:focus-visible { outline: 2px solid var(--credit); outline-offset: 2px; }
+  .counter {
+    font-family: var(--mono); font-size: 12px; color: var(--slate);
+    font-variant-numeric: tabular-nums;
+  }
+  .navs { display: flex; gap: 8px; }
+  .nav {
+    font-family: var(--mono); font-size: 12px;
+    background: transparent; color: var(--ink);
+    border: 1px solid var(--rule); padding: 5px 11px; cursor: pointer;
+  }
+  .nav:hover { border-color: var(--ink); }
+  .nav[disabled] { opacity: .35; cursor: default; }
+
+  @media (prefers-reduced-motion: no-preference) {
+    .slide.active .inner > * { animation: rise .32s ease-out both; }
+    .slide.active .inner > *:nth-child(2) { animation-delay: .04s; }
+    .slide.active .inner > *:nth-child(3) { animation-delay: .08s; }
+    .slide.active .inner > *:nth-child(4) { animation-delay: .12s; }
+    @keyframes rise { from { opacity: 0; transform: translateY(7px); } }
+  }
+</style>
+
+<div class="deck">
+
+  <!-- 1 -->
+  <section class="slide active" data-i="1">
+    <div class="inner">
+      <p class="eyebrow">01 / The problem</p>
+      <h1>The budget runs out before the month does.</h1>
+      <p class="lede">AI is expensive, so companies cap it. But a cap doesn't make
+        anyone cheaper — whether you set it or live under it. Hit it on the 22nd and
+        you're either asking for more, or working without AI until the 1st.</p>
+      <div class="receipt">
+        <div class="receipt-row"><span>Monthly budget</span><span class="amt">$500</span></div>
+        <div class="receipt-row"><span>Gone by the 22nd</span><span class="amt">$500</span></div>
+        <div class="receipt-row"><span>Option A</span><span class="amt">ask for more</span></div>
+        <div class="receipt-row"><span>Option B</span><span class="amt">no AI till the 1st</span></div>
+        <div class="receipt-row total"><span>Neither is a plan</span><span class="amt">↓</span></div>
+      </div>
+      <p class="callout" style="margin-top:22px">And "be more efficient" isn't advice
+        anyone can act on. Knowing what actually costs money means understanding half
+        a dozen things about how Claude Code works — which most people won't learn,
+        and shouldn't have to. <strong>You can see the number. Nobody explains it,
+        and nobody coaches you.</strong></p>
+    </div>
+  </section>
+
+  <!-- 2 -->
+  <section class="slide" data-i="2">
+    <div class="inner">
+      <div class="gates">
+        <span class="gate inspector on">cost-inspector</span>
+        <span class="gate coach on">cost-coach</span>
+      </div>
+      <p class="eyebrow">02 / Two skills, split on purpose</p>
+      <h2>One gives facts. One gives opinions.</h2>
+      <p class="lede">Two installs, because you'd use them at very different
+        rates. One is cheap enough to run any time. The other costs real money and
+        reads your actual conversations — so you only install it if you want
+        that.</p>
+      <div class="two">
+        <div class="col">
+          <h3>cost-inspector</h3>
+          <p class="role">Facts · pennies a run · read-only</p>
+          <p>Looks at your settings and your usage counters — how much you used,
+            which model, which tools. Just arithmetic.</p>
+          <p><strong>It never reads what was said.</strong> Not behind a flag, not
+            behind a prompt.</p>
+          <p>Nothing leaves your machine. The few pennies are just the report
+            being read back to you.</p>
+        </div>
+        <div class="col coach">
+          <h3>cost-coach</h3>
+          <p class="role">Opinions · a few dollars a run · opt-in</p>
+          <p>Reads a handful of your <strong>real conversations</strong> and points
+            out the habits costing you money — quoting your own words as proof.</p>
+          <p>Asks permission and shows the price before it reads anything.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 3 -->
+  <section class="slide" data-i="3">
+    <div class="inner">
+      <div class="gates">
+        <span class="gate inspector on">cost-inspector</span>
+        <span class="gate coach off">cost-coach</span>
+      </div>
+      <p class="eyebrow">03 / What it checks</p>
+      <h2>16 checks, four kinds of waste.</h2>
+      <div class="groups">
+        <div class="group">
+          <div class="k">A · ALWAYS ON</div>
+          <div class="t">Paid on every message</div>
+          <div class="d">Skills and plugins you never use, instruction files that
+            got too long, connected services you never call.</div>
+        </div>
+        <div class="group">
+          <div class="k">B · PRICE</div>
+          <div class="t">What each message costs</div>
+          <div class="d">Which model you start on, how hard Claude thinks before
+            answering, and what its helpers use.</div>
+        </div>
+        <div class="group">
+          <div class="k">C · CACHE</div>
+          <div class="t">Paying twice for the same text</div>
+          <div class="d">Claude re-uses your conversation at a tenth of the price.
+            When that breaks you pay twice — and a session left open all day
+            carries everything said in it.</div>
+        </div>
+        <div class="group">
+          <div class="k">D · HABITS</div>
+          <div class="t">How you work</div>
+          <div class="d">Screenshots, which stay in the conversation and are paid
+            for on every message after. The same file read twice.</div>
+        </div>
+      </div>
+      <p class="lede" style="margin-top:24px">Skills I never ran were adding
+        <strong class="num">1,595 tokens to every message I sent</strong> — their
+        descriptions load whether I use them or not.</p>
+    </div>
+  </section>
+
+  <!-- 4 -->
+  <section class="slide" data-i="4">
+    <div class="inner">
+      <div class="gates">
+        <span class="gate inspector on">cost-inspector</span>
+        <span class="gate coach off">cost-coach</span>
+      </div>
+      <p class="eyebrow">04 / When it finds something</p>
+      <h2>Every finding says who fixes it.</h2>
+      <p class="lede">Nothing changes unless you ask. Anything that edits a file
+        saves a dated backup first, so you can always go back.</p>
+      <ul class="plain">
+        <li><span class="tag yes">We can do it</span><span>Mechanical and undoable —
+          like switching off auto-loading for 14 skills you never use.</span></li>
+        <li><span class="tag ask">Claude can help</span><span>Needs a judgement call,
+          so it shows you the edit first. Which rules belong in which folder isn't
+          a script's decision.</span></li>
+        <li><span class="tag">You, by hand</span><span>It gives you the command; you
+          run it.</span></li>
+        <li><span class="tag">Just a habit</span><span>Nothing to install. Knowing
+          is the fix.</span></li>
+      </ul>
+      <p class="callout" style="margin-top:22px">The big one — your model — no
+        setting can fix, because you pick it fresh every session. So there's an
+        optional reminder: on your first message it asks whether <em>this</em> job
+        really needs the expensive model, and stays quiet unless it clearly
+        doesn't.</p>
+    </div>
+  </section>
+
+  <!-- 5 -->
+  <section class="slide" data-i="5">
+    <div class="inner">
+      <div class="gates">
+        <span class="gate inspector off">cost-inspector</span>
+        <span class="gate coach on">cost-coach</span>
+      </div>
+      <p class="eyebrow">05 / Reading your own sessions</p>
+      <h2>It quotes you back to yourself.</h2>
+      <p class="lede">It reads your five most expensive sessions — in a separate
+        helper, on a cheaper model, so the raw text never lands in the conversation
+        you're having. It costs <strong>about $4 a run</strong>, far more than
+        the inspector, which is why it's a separate install and tells you the price
+        before it reads a word.</p>
+      <div class="receipt" style="max-width:640px">
+        <div class="receipt-row"><span>Finding</span><span class="amt">costs real money</span></div>
+        <div class="receipt-row" style="display:block; font-size:15px; color:var(--slate); line-height:1.6">
+          <strong style="color:var(--ink)">The same action, over and over.</strong>
+          Claude clicked through a page <strong class="num">100+</strong> times, one
+          action at a time, each one sending back a screenshot you paid for.
+          Claude Code kept suggesting it group them:<br>
+          <span style="color:var(--ink)">“Prefer browser_batch to execute multiple
+          actions in one call.”</span><br>
+          It said that after nearly every click. Nobody acted on it.
+        </div>
+        <div class="receipt-row total"><span>Every finding carries a real quote</span><span class="amt">or it's dropped</span></div>
+      </div>
+      <p class="lede" style="margin-top:20px">That last part is enforced in code: a
+        finding with no evidence you can check <strong>cannot be printed</strong>.</p>
+    </div>
+  </section>
+
+  <!-- 6 -->
+  <section class="slide" data-i="6">
+    <div class="inner">
+      <div class="gates">
+        <span class="gate inspector on">cost-inspector</span>
+        <span class="gate coach off">cost-coach</span>
+      </div>
+      <p class="eyebrow">06 / On my own machine</p>
+      <h2>What it actually found.</h2>
+      <div class="bignum">$4.44<span style="font-size:.38em; color:var(--slate)">/mo</span></div>
+      <p class="bigsub">measured waste — things nobody is using, charged whatever you
+        do · 6 of 15 judged checks passed · 116 sessions</p>
+      <div class="receipt" style="margin-top:22px; max-width:520px">
+        <div class="receipt-row"><span>Skills you never use</span><span class="amt">$3.22</span></div>
+        <div class="receipt-row"><span>Memory notes too long</span><span class="amt">$0.97</span></div>
+        <div class="receipt-row"><span>Connected tools unused</span><span class="amt">$0.18</span></div>
+        <div class="receipt-row total"><span>Arithmetic — safe to add up</span><span class="amt">$4.39</span></div>
+        <div class="receipt-row" style="display:block; font-size:13.5px; color:var(--slate); line-height:1.55; padding-top:12px">
+          <strong style="color:var(--ink)">Kept out of that total:</strong> anything that
+          depends on working differently. Each is the <em>most</em> it could save, and
+          they overlap each other — so they are never added, to this or to each other.
+        </div>
+        <div class="receipt-row"><span>Most work runs on the expensive model</span><span class="amt">up to $285</span></div>
+        <div class="receipt-row"><span>Long sessions never cleared</span><span class="amt">up to $162</span></div>
+        <div class="receipt-row"><span>Thinking effort above medium</span><span class="amt">up to $10.14</span></div>
+        <div class="receipt-row"><span>Lots of screenshots</span><span class="amt">up to $7.81</span></div>
+      </div>
+      <p class="callout" style="margin-top:22px">Two honesty rules it holds itself to.
+        <strong>One:</strong> list prices ran <strong>1.8× my real bill</strong>, so it asks
+        for your actual spend, works out a correction factor
+        <span class="num">(×0.554 for me)</span> and remembers it — otherwise it would
+        have claimed <span class="strike num">$505</span>. <strong>Two:</strong> every figure resting
+        on a guess about behaviour stays out of the headline. Added together they would
+        have claimed <span class="strike num">$448</span> — 90% of the bill — because
+        repricing the model and clearing long sessions are largely
+        <em>the same dollars counted twice</em>.</p>
+    </div>
+  </section>
+
+  <!-- 7 -->
+  <section class="slide" data-i="7">
+    <div class="inner">
+      <div class="gates">
+        <span class="gate inspector on">cost-inspector</span>
+        <span class="gate coach off">cost-coach</span>
+      </div>
+      <p class="eyebrow">07 / Rolling it out</p>
+      <h2>One of these can go to the whole team.</h2>
+      <p class="lede">If you set the budget, the cap was never the fix — giving
+        people the explanation is. That part you can deploy once, centrally, on a
+        Team or Enterprise plan.</p>
+      <ul class="plain">
+        <li><span class="tag yes">Hand it out</span><span>Add the skill to your
+          organisation's plugin list. People install it once.</span></li>
+        <li><span class="tag yes">Run it for them</span><span>An admin setting can
+          start it at the beginning of a session. Everyone approves it once, then it
+          stays out of the way.</span></li>
+        <li><span class="tag yes">Deploy nothing</span><span>Simplest version: when
+          someone asks for more budget, ask for their report first. Usually the
+          answer is in it.</span></li>
+      </ul>
+      <p class="callout" style="margin-top:22px"><strong>Only ever roll out the
+        inspector.</strong> It reads settings and counters. The coach reads what
+        people actually wrote — pushed onto a team by their employer, that isn't
+        coaching, it's monitoring. It stays personal and opt-in.</p>
+    </div>
+  </section>
+
+  <!-- 8 -->
+  <section class="slide" data-i="8">
+    <div class="inner">
+      <div class="gates">
+        <span class="gate inspector on">cost-inspector</span>
+        <span class="gate coach off">cost-coach</span>
+      </div>
+      <p class="eyebrow">08 / Example output</p>
+      <h2>What the report says.</h2>
+      <p class="lede">Every number here came off my own machine. Click a row to
+        see why it costs you.</p>
+
+      <div class="doc">
+        <div class="doc-head">
+          <div>
+            <div class="fig-big">$4.44<span>/mo</span></div>
+            <p class="fig-sub">measured waste &middot; 1% of $518.65 calibrated spend &middot;
+              behaviour changes listed below, deliberately never added in</p>
+          </div>
+          <div class="score">
+            <b>6<span>/15</span></b>
+            <span>judged checks passed<br>(2 more not applicable)</span>
+          </div>
+        </div>
+
+        <p class="startline"><span class="lbl">Start here:</span> 75% of messages ran on
+          the expensive model &mdash; at most $285 a month, and the least certain figure
+          here. It also overlaps the long-sessions row below: largely the same dollars,
+          which is why nothing on this page adds them together.</p>
+
+        <p class="legend">
+          <span><i class="w"></i>needs attention</span>
+          <span><i class="o"></i>all good</span>
+          <span>&ldquo;up to&rdquo; = depends on working differently</span>
+          <span>click any row to open</span>
+        </p>
+
+        <details class="f warn">
+          <summary><span class="f-title">Most work runs on the expensive model</span><span class="f-amt">up to $274</span><span class="f-who">Claude can help</span></summary>
+          <div class="f-body">
+            <p>76% of your messages went to an
+              expensive model; model=opus[1m] (set in user settings)</p>
+            <p>The check counts <em>how much</em> ran on the costly model. It
+              cannot see which of it was hard &mdash; so read this as a question
+              worth asking, not a verdict. It used to be called &ldquo;expensive
+              model on easy work&rdquo;, which claimed more than it could
+              measure.</p>
+            <p>Claude Code picks the
+              model once, when the session starts, and keeps it for the whole session.
+              It does not switch to a cheaper one by itself for easy questions. So if
+              your default is the most expensive model, you also pay that rate for
+              'rename this variable'. Priced at Sonnet's rates instead, the exact same
+              work would have cost $274 a month less. Read that as the most it could
+              save, not a forecast: it assumes Sonnet would have finished every one of
+              those tasks. It is the only figure here that is not plain arithmetic, which
+              is why it is kept out of the headline.</p>
+            <p><span class="lbl">Do this:</span> Switch by hand when you know a
+              session is easy &mdash; type <span class="num">/model sonnet</span> &mdash;
+              or change your default. Or turn on the optional reminder, which runs once
+              on your first message and stays quiet unless the task clearly does not
+              need what you are paying for:</p>
+            <pre>python3 ".../cost-inspector/scripts/audit.py" --install-hook</pre>
+            <p class="quote">Switching model throws away the saved copy of your
+              conversation, so everything said so far gets re-sent at full price once.
+              At your first message that is small change; fifty messages in it is
+              several times worse. Starting on the cheaper model costs nothing at all.</p>
+          </div>
+        </details>
+
+        <details class="f warn">
+          <summary><span class="f-title">Thinking effort above medium</span><span class="f-amt">up to $9.85</span><span class="f-who">Claude can help</span></summary>
+          <div class="f-body">
+            <p>effort is 'high' (in your user settings)</p>
+            <p>Effort is how long Claude
+              thinks before it answers. More thinking means more text produced, and you
+              pay for that text. Like the model, it is set once per session and does
+              not adapt per question, so a high default applies to simple jobs too. The
+              good news: dropping effort usually costs you less quality than dropping to
+              a weaker model, so try this lever first. Anything above medium is flagged,
+              including Claude Code's own default &mdash; if you have never touched this
+              setting, you are on the expensive end without having chosen it. The
+              figure assumes roughly a third less thinking at medium, so it is an
+              estimate rather than a measurement &mdash; which is why it says
+              &ldquo;up to&rdquo;.</p>
+            <p><span class="lbl">Do this:</span> Set your default effort to medium,
+              and raise it for the occasional hard task that needs it.</p>
+          </div>
+        </details>
+
+        <details class="f warn">
+          <summary><span class="f-title">Skills you never use</span><span class="f-amt">$3.27</span><span class="f-who">we can fix it</span></summary>
+          <div class="f-body">
+            <p>14 skills you have not used in 30 days. Skills newer than the
+              30-day window are listed separately and not counted &mdash; calling a
+              nine-day-old skill 'unused for 30 days' would not be true.</p>
+            <p>A skill is a saved set of
+              instructions for one kind of task. So that Claude can choose a skill on
+              its own, it keeps a list of every skill's name and description in front of
+              it at all times &mdash; and you pay for that list on every message,
+              including the skills you never use. Adding one line takes a skill off the
+              list but keeps it working: you can still start it yourself by typing a
+              slash and its name.</p>
+            <p><span class="lbl">Do this:</span> we can do this for you &mdash; a
+              dated backup is saved before anything is touched:</p>
+            <pre>python3 ".../cost-inspector/scripts/audit.py" --apply A4</pre>
+          </div>
+        </details>
+
+        <details class="f warn">
+          <summary><span class="f-title">Lots of screenshots</span><span class="f-amt">up to $7.71</span><span class="f-who">just a habit</span></summary>
+          <div class="f-body">
+            <p>340 screenshot calls (~884k image tokens at ~2,600 each, each
+              then carried through ~26 later messages)</p>
+            <p>A screenshot goes into the
+              conversation as a picture. One picture costs far more than a line of text,
+              and it stays in the conversation from then on, so you keep paying for it.
+              The 2,600 figure comes from the image's pixel size &mdash; a rule of thumb,
+              not a measurement, because the exact count per image is not recorded. The
+              cost counts both the first copy and every message that carries it
+              afterwards. It says &ldquo;up to&rdquo; because it assumes you would not
+              have taken the picture at all &mdash; some of them you needed.</p>
+            <p><span class="lbl">Do this:</span> When you only need to know what a
+              page says, ask Claude to read the page text or the error log instead of
+              taking a picture. Keep screenshots for when you need to see the layout.</p>
+          </div>
+        </details>
+
+        <details class="f warn">
+          <summary><span class="f-title">Memory notes too long</span><span class="f-amt">$0.99</span><span class="f-who">Claude can help</span></summary>
+          <div class="f-body">
+            <p>4 of your 11 project memory
+              lists need tidying</p>
+            <p>MEMORY.md is the contents
+              page for the things Claude remembers about a project, and it loads on
+              every message in that project. It should hold one short line per memory
+              &mdash; the details belong in the separate files, which load only when
+              relevant. Two other traps: a memory file missing from the list never gets
+              used at all, and past 200 lines (or 25KB) the rest is dropped and never reaches Claude at
+              all. Only the part that actually loads is charged for &mdash; the overflow
+              is a correctness problem, not a cost one.</p>
+            <p><span class="lbl">Do this:</span> Shorten each line to one sentence
+              and move the detail into the file it links to.</p>
+          </div>
+        </details>
+
+        <details class="f warn">
+          <summary><span class="f-title">Connected tools not used in 30d</span><span class="f-amt">$0.14</span><span class="f-who">you, by hand</span></summary>
+          <div class="f-body">
+            <p>6 of 8 unused. Servers attached to a different project are listed
+              separately and not charged here &mdash; they do not load in this folder.</p>
+            <p>An MCP server is an
+              outside service you connect to Claude, like Gmail or Jira. Its tool
+              instructions now load only when needed, so an unused one is much cheaper
+              than it was &mdash; but the tool names still sit in the list Claude
+              carries on every message. Anthropic does not publish that cost, so this
+              figure is our own estimate built from the servers you do use &mdash; given as
+              a range, and a floor rather than a measurement.</p>
+            <p><span class="lbl">Do this:</span> Disconnect the ones you are not
+              using. You can always reconnect later.</p>
+          </div>
+        </details>
+
+        <details class="f warn">
+          <summary><span class="f-title">Long sessions never cleared</span><span class="f-amt">up to $152</span><span class="f-who">just a habit</span></summary>
+          <div class="f-body">
+            <p>25 sessions spent long stretches carrying more than 100k of history
+              &mdash; the worst ran 471 messages in a row without a reset</p>
+            <p>Claude re-sends the whole conversation with every message, so a message
+              near the end of a long chat can cost five times the same message at the
+              start. In a session open all day, a one-line question still carries
+              everything said before it. Anthropic's own cost guidance names this as
+              the biggest single cause of surprise bills.</p>
+            <p>This is measured on how long a chat stayed big, not how big it got: a
+              session that touched 400k on its final message cost almost nothing extra,
+              while one sitting at 300k for 400 messages paid that every time. Like the
+              model figure, it is an upper bound rather than a forecast &mdash; it has
+              to assume all that history was dead weight, and settings alone cannot
+              tell. That is exactly what the companion skill reads conversations to
+              find out, so it is kept out of the headline.</p>
+            <p><span class="lbl">Do this:</span> Type <span class="num">/clear</span>
+              when you switch to unrelated work &mdash; it starts fresh and costs
+              nothing. When you do need the history carried forward,
+              <span class="num">/compact</span> is worth it: it re-reads the
+              conversation once, which is one expensive request, but every message
+              after it is far cheaper, so it pays for itself within a few messages. The
+              one time to skip it is when the session is nearly over.</p>
+          </div>
+        </details>
+
+        <details class="f warn">
+          <summary><span class="f-title">Connected tools with a free command-line version</span><span class="f-amt">$0.05</span><span class="f-who">you, by hand</span></summary>
+          <div class="f-body">
+            <p>atlassian &rarr; acli</p>
+            <p>These services are connected as MCP servers, so their tool names sit in
+              the list Claude carries on every message &mdash; even when you are not
+              using them. The same jobs can be done with a command-line tool, which
+              Claude simply runs when needed and which adds nothing to every message.
+              You <em>are</em> using these, so this is a swap rather than a
+              disconnect.</p>
+            <p><span class="lbl">Do this:</span> Try the command-line tool for a week.
+              If you do not miss the server, disconnect it.</p>
+          </div>
+        </details>
+
+        <details class="f neu">
+          <summary><span class="f-title">Instruction files Claude never reads</span><span class="f-amt">costs nothing</span><span class="f-who">Claude can help</span></summary>
+          <div class="f-body">
+            <p>1 AGENTS.md file is being ignored: Apps/context-builder/AGENTS.md
+              (9 lines), outranked by the CLAUDE.md beside it</p>
+            <p>AGENTS.md is the instructions file other coding tools read. Claude
+              reads it too &mdash; but only when there is no CLAUDE.md in that
+              folder or any folder above it. A CLAUDE.md always wins. These cost
+              you nothing, because Claude never opens them. That is the problem:
+              if you wrote rules in them expecting Claude to follow them, it is
+              not.</p>
+            <p><span class="lbl">Do this:</span> Move the rules you still want
+              into the CLAUDE.md that is winning. You can instead add
+              <span class="num">@AGENTS.md</span> to it, but that costs tokens on
+              every message, because imports load at launch.</p>
+          </div>
+        </details>
+
+        <details class="f ok">
+          <summary><span class="f-title">6 checks passed, 3 not applicable</span><span class="f-who">nothing to do</span></summary>
+          <div class="f-body">
+            <table>
+              <tr><td class="st ok">good</td><td>Instructions loaded on every message</td><td>42 lines across 2 files &mdash; under the 200-line guideline</td></tr>
+              <tr><td class="st ok">good</td><td>Imported files in CLAUDE.md</td><td>no @ imports in your always-loaded files</td></tr>
+              <tr><td class="st ok">good</td><td>Plugins you never use</td><td>3 plugins, all used or already off</td></tr>
+              <tr><td class="st ok">good</td><td>Paying twice for the same text</td><td>96.3% re-used from cache</td></tr>
+              <tr><td class="st ok">good</td><td>Fast mode left on</td><td>no messages used fast mode &mdash; it runs the same model at about double the price</td></tr>
+              <tr><td class="st ok">good</td><td>Reading the same file twice</td><td>76 repeats &mdash; not enough to matter</td></tr>
+              <tr><td class="st neu">n/a</td><td>Instructions in the wrong place</td><td>no project instructions file here</td></tr>
+              <tr><td class="st neu">n/a</td><td>Connected tools not in your config file</td><td>15 servers in use that came from a plugin or the Claude app &mdash; we cannot size or switch those off from here</td></tr>
+              <tr><td class="st neu">n/a</td><td>Connected tools set up in other projects</td><td>1 server configured elsewhere &mdash; not loaded here, not charged</td></tr>
+            </table>
+          </div>
+        </details>
+
+        <details class="f neu">
+          <summary><span class="f-title">Your numbers</span><span class="f-who">116 sessions, 30 days</span></summary>
+          <div class="f-body">
+            <table>
+              <tr><td><span class="lbl">Calibrated spend</span></td><td class="amt">$518.65</td><td>a month at this rate</td></tr>
+              <tr><td>Always-on extra</td><td class="amt">~2.2k</td><td>tokens per message &mdash; instructions, skill names and memory, re-sent every time you hit enter</td></tr>
+              <tr><td>On an expensive model</td><td class="amt">76%</td><td>of messages went to Opus rather than Sonnet or Haiku</td></tr>
+              <tr><td>Re-used text</td><td class="amt">96.3%</td><td>served from cache at a tenth of the price. Higher is better</td></tr>
+            </table>
+            <p class="quote"><span class="lbl">About the dollar figures.</span> You told
+              us you were actually billed $233.39. Over the same period our own maths
+              said $423.22, so every figure has been scaled by
+              <span class="num">&times;0.554</span> to match your real bill. That factor
+              is worked out from your billing period alone &mdash; changing how many days
+              the report covers does not move it.</p>
+          </div>
+        </details>
+
+        <details class="f neu">
+          <summary><span class="f-title">Want a deeper look?</span><span class="f-who">the other skill</span></summary>
+          <div class="f-body">
+            <p>Everything above came from settings and totals. It cannot see
+              <em>how</em> you work &mdash; whether questions start clearly, whether
+              work gets redone. A companion skill, <span class="lbl">cost-coach</span>,
+              reads a few of your actual conversations and tells you that part. Your
+              results suggest it is worth a look (heavy screenshot use). It would read
+              your 5 most expensive sessions and cost roughly
+              <span class="lbl">$4.19</span>, because reading conversations is not free.</p>
+          </div>
+        </details>
+
+        <p class="foot">Privacy: built only from your settings files and from counters
+          like token totals and tool names. It never opened a single one of your
+          conversations.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- 9 -->
+  <section class="slide" data-i="9">
+    <div class="inner">
+      <div class="gates">
+        <span class="gate inspector off">cost-inspector</span>
+        <span class="gate coach on">cost-coach</span>
+      </div>
+      <p class="eyebrow">09 / Example output</p>
+      <h2>And what the coach says.</h2>
+      <p class="lede">Same machine, five real conversations. Every row quotes what
+        actually happened — so you can argue with it.</p>
+
+      <div class="doc">
+        <div class="doc-head">
+          <div>
+            <div class="fig-big warnfig">4<span> habits</span></div>
+            <p class="fig-sub">found across 5 sessions &middot; $4.09 to read them</p>
+          </div>
+          <div class="score">
+            <b>471</b>
+            <span>messages, one chat,<br>never cleared out</span>
+          </div>
+        </div>
+
+        <p class="legend">
+          <span><i class="w"></i>costs real money</span>
+          <span><i class="m"></i>worth changing</span>
+          <span><i class="o"></i>minor</span>
+        </p>
+
+        <details class="f warn">
+          <summary><span class="f-title">The same kind of action repeated many times</span><span class="f-who">5e883b65</span></summary>
+          <div class="f-body">
+            <p class="why"><em>Why this pattern costs money:</em> Many small repeated
+              actions cost far more than one batched action, and each result stays in
+              the conversation.</p>
+            <p><span class="lbl">What we saw in your conversation:</span></p>
+            <p class="quote">You used a single tool call this turn. Prefer
+              browser_batch to execute multiple actions in one call &mdash; it is
+              significantly faster.</p>
+            <p><span class="lbl">What it cost you:</span> For about an hour, Claude
+              clicked through the page one action at a time &mdash; well over 100
+              separate steps to build a single small workflow &mdash; and each step sent
+              back a screenshot that you then paid for. Claude Code itself suggested
+              grouping the steps after nearly every one of those calls, and the
+              suggestion went unused.</p>
+            <p><span class="lbl">What to do next time:</span> Ask Claude to group the
+              steps: 'do these in one batch, and only stop for a screenshot when you
+              need to see the result before deciding what to do next'.</p>
+          </div>
+        </details>
+
+        <details class="f warn">
+          <summary><span class="f-title">A long chat kept paying for a part nobody was using</span><span class="f-who">5e883b65</span></summary>
+          <div class="f-body">
+            <p class="why"><em>Why this pattern costs money:</em> Every message
+              re-sends the whole chat so far, so the longer one runs the more each
+              new message costs. The last message in a long chat can cost five
+              times the first.</p>
+            <p><span class="lbl">What we saw in your conversation:</span></p>
+            <p class="quote">471 messages in a row, every one of them dragging a
+              short novel's worth of earlier conversation along behind it &mdash; the
+              chat was never cleared out or started fresh.</p>
+            <p><span class="lbl">What it cost you:</span> The free report already
+              told you this chat was expensive to carry. What it cannot tell you is
+              <em>when it stopped being worth it</em> &mdash; and that is the useful
+              part. The first half of this conversation was one job; once that job
+              was signed off, none of it came up again, but you paid to carry all of
+              it through the 300-odd messages that followed.</p>
+            <p><span class="lbl">What to do next time:</span> That sign-off was the
+              moment to start fresh. When a job is done and the next one is
+              unrelated, type <span class="num">/clear</span> &mdash; it costs
+              nothing. When you do still need the history, type
+              <span class="num">/compact</span>: it asks Claude to summarise the old
+              part so you stop paying full price for it, and it earns that cost back
+              within a few messages.</p>
+          </div>
+        </details>
+
+        <details class="f mid">
+          <summary><span class="f-title">An expensive model did simple work</span><span class="f-who">d829e0c8</span></summary>
+          <div class="f-body">
+            <p><span class="lbl">What it cost you:</span> This session &mdash; 354
+              messages spread over several days &mdash; ran on the most expensive model
+              while doing work that was almost entirely mechanical: find-and-replace
+              edits, running builds, checking git, running deploy commands. Opus costs
+              roughly two and a half times what Sonnet does.</p>
+            <p><span class="lbl">What to do next time:</span> Start long
+              editing-and-deploying sessions on the cheaper model &mdash; type
+              <span class="num">/model sonnet</span> before you begin. Starting cheap
+              costs you nothing, whereas switching part-way means everything said so far
+              gets re-sent once at full price.</p>
+          </div>
+        </details>
+
+        <details class="f ok">
+          <summary><span class="f-title">The request was not clear enough at the start</span><span class="f-who">d829e0c8</span></summary>
+          <div class="f-body">
+            <p><span class="lbl">What we saw in your conversation:</span></p>
+            <p class="quote">follow this rule when you built trees [Image #1]</p>
+            <p><span class="lbl">What it cost you:</span> The request was a screenshot
+              with no written rule attached. It took two rounds of clarifying questions
+              &mdash; one of which you rejected as too early &mdash; and about 11
+              minutes before any real work started. That same vagueness is what produced
+              the thrown-away feature above, so this one cost you twice.</p>
+            <p><span class="lbl">What to do next time:</span> When the request is an
+              image, add one sentence saying what finished looks like.</p>
+          </div>
+        </details>
+
+        <details class="f neu">
+          <summary><span class="f-title">Which conversations we read</span><span class="f-who">5 of them</span></summary>
+          <div class="f-body">
+            <table>
+              <tr><th>Session</th><th>Project</th><th>Messages</th><th>Read</th><th>Cost</th></tr>
+              <tr><td class="num">45485524</td><td>My-Work</td><td class="amt">1,011</td><td>part of it</td><td class="amt">$1.13</td></tr>
+              <tr><td class="num">d829e0c8</td><td>context-builder</td><td class="amt">597</td><td>part of it</td><td class="amt">$0.91</td></tr>
+              <tr><td class="num">5e883b65</td><td>Work</td><td class="amt">521</td><td>part of it</td><td class="amt">$0.86</td></tr>
+              <tr><td class="num">b44d028a</td><td>Work</td><td class="amt">254</td><td>part of it</td><td class="amt">$0.68</td></tr>
+              <tr><td class="num">b1ea6241</td><td>My-Work</td><td class="amt">121</td><td>all of it</td><td class="amt">$0.51</td></tr>
+            </table>
+            <p class="quote">A sample, not the full story. 4 of them were too long to
+              read in full, so anything said about those covers the beginning only.
+              One conversation still in progress was left out &mdash; including this one.</p>
+          </div>
+        </details>
+
+        <details class="f ok">
+          <summary><span class="f-title">What was already fine</span><span class="f-who">said out loud</span></summary>
+          <div class="f-body">
+            <p>Three of the five conversations had nothing worth flagging: helper
+              subagents were used properly for open-ended research, so their raw
+              results never piled up in the main conversation, and the checking caught
+              real mistakes before they shipped.</p>
+            <p>Across all five we found nothing at all for two of the patterns we look
+              for &mdash; changing subject without starting a fresh conversation, and
+              big searches left in the main chat.</p>
+            <p>One honest note: the long-chat problem above turned up in
+              <em>all five</em> conversations. Only one is listed, because five copies
+              of the same advice is not five findings &mdash; and because in two of
+              them the long chat was the right call: the work really was one
+              continuous job, so there was no good moment to start over. The free
+              report cannot tell those two apart from the rest. That difference is
+              the only reason to pay for this one.</p>
+          </div>
+        </details>
+
+        <p class="foot">Judgement, not arithmetic &mdash; so it can be wrong in ways a
+          number cannot. That is exactly why every row quotes its source. Secrets are
+          stripped before reading, best-effort and never guaranteed.</p>
+      </div>
+    </div>
+  </section>
+
+  <nav class="bar">
+    <div class="dots" id="dots" role="tablist" aria-label="Slides"></div>
+    <span class="counter" id="counter">01 / 09</span>
+    <div class="navs">
+      <button class="nav" id="prev" aria-label="Previous slide">← prev</button>
+      <button class="nav" id="next" aria-label="Next slide">next →</button>
+    </div>
+  </nav>
+</div>
+
+<script>
+  (function () {
+    var slides = Array.prototype.slice.call(document.querySelectorAll('.slide'));
+    var dots = document.getElementById('dots');
+    var counter = document.getElementById('counter');
+    var prev = document.getElementById('prev');
+    var next = document.getElementById('next');
+    var at = 0;
+
+    slides.forEach(function (_, i) {
+      var b = document.createElement('button');
+      b.className = 'dot';
+      b.type = 'button';
+      b.setAttribute('role', 'tab');
+      b.setAttribute('aria-label', 'Slide ' + (i + 1));
+      b.addEventListener('click', function () { go(i); });
+      dots.appendChild(b);
+    });
+
+    function pad(n) { return (n < 10 ? '0' : '') + n; }
+
+    function go(i) {
+      at = Math.max(0, Math.min(slides.length - 1, i));
+      slides.forEach(function (s, k) { s.classList.toggle('active', k === at); });
+      Array.prototype.forEach.call(dots.children, function (d, k) {
+        d.setAttribute('aria-current', k === at ? 'true' : 'false');
+      });
+      counter.textContent = pad(at + 1) + ' / ' + pad(slides.length);
+      prev.disabled = at === 0;
+      next.disabled = at === slides.length - 1;
+      slides[at].scrollTop = 0;
+    }
+
+    prev.addEventListener('click', function () { go(at - 1); });
+    next.addEventListener('click', function () { go(at + 1); });
+    document.addEventListener('keydown', function (e) {
+      if (e.key === 'ArrowRight' || e.key === 'PageDown' || e.key === ' ') { go(at + 1); e.preventDefault(); }
+      if (e.key === 'ArrowLeft' || e.key === 'PageUp') { go(at - 1); e.preventDefault(); }
+      if (e.key === 'Home') { go(0); }
+      if (e.key === 'End') { go(slides.length - 1); }
+    });
+
+    go(0);
+  })();
+</script>
+
+</body></html>

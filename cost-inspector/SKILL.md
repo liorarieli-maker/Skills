@@ -31,23 +31,40 @@ python3 scripts/audit.py --calibration-status
   figure is a list price, measured at ~1.8x a real bill on one Enterprise
   account.
 
-  Ask for **three** things, not one — the output carries them in
-  `ask_user_for`:
+  **Ask this way, it is one step:**
 
-  1. the amount billed so far this period
-  2. the date the period started (`--spend-since`)
-  3. the time they read it (`--spend-asof`) — without this the factor decays
-     on every later run
+  > Type `/usage` and paste me the line showing what you've spent.
 
-  **Name the exact screen for their plan.** "Your usage panel" is not an
-  answer; the place differs, and the output gives all three in
-  `how_to_find_it`:
+  Then feed it straight in — you do not need to read the number yourself:
+
+  ```bash
+  python3 scripts/audit.py --usage-paste "<what they pasted>"
+  ```
+
+  That derives the billing period from the current month and the reading
+  time from now, so the user supplies one thing instead of three. It prints
+  `read_back` — **say that line to them** before trusting the figure.
+
+  If it returns `ok: false` with several `candidates`, it found more than one
+  amount and will not guess. Ask which one, or pass `--actual-spend` yourself.
+  If it matched `total-cost`, that is the *current session*, not the period —
+  say so, it is a weaker calibration.
+
+  **Only if they cannot use `/usage`**, ask for the three values directly —
+  amount, period start (`--spend-since`), and the time they read it
+  (`--spend-asof`, without which the factor decays on every later run) — and
+  **name the exact screen for their plan**. "Your usage panel" is not an
+  answer; the output gives all three in `how_to_find_it`:
 
   | Plan | Where |
   |---|---|
   | Pro / Max | `/usage-credits`, or claude.ai → Settings → Usage → Usage credits |
   | Team / Enterprise | claude.ai → Admin settings → Usage, or the org spend report from their admin |
   | API / Console | platform.claude.com/usage |
+
+  **You cannot run `/usage` yourself** — it is a Claude Code CLI command, not
+  a shell command, and not a skill. The user has to type it. Do not pretend
+  to have read it.
 
 - **`"action": "proceed_managed_rates"`** — an admin has published the
   organisation's contracted rates in the `modelPricing` managed setting, so
@@ -67,6 +84,9 @@ rate error. Never present an uncalibrated total as if it were their bill.
 python3 scripts/audit.py            # default: last 30 days
 python3 scripts/audit.py --days 7
 python3 scripts/audit.py --json     # machine-readable
+
+# Calibrate from a pasted /usage block - the cheapest ask (see Step 0)
+python3 scripts/audit.py --usage-paste "$12.34 of $50.00 spent"
 
 # Calibrate against a real bill (strongly recommended - see below)
 python3 scripts/audit.py --actual-spend 120.00 --spend-since 2026-09-01 \
@@ -128,7 +148,11 @@ this skill fails: the user is told to read something they cannot see.
 
 Every run ends with, in this order:
 
-1. **A one-line TL;DR** — total avoidable spend, and the one biggest cause.
+1. **A one-line TL;DR with BOTH figures, never one.** The measured total
+   (things nobody is using, charged every message — plain arithmetic, the
+   checks do not overlap) and, separately, the largest upper bound. Never add
+   them: `B1` reprices the very cache reads `C2` calls avoidable, so summing
+   them claimed 85% of spend was avoidable on the reference machine.
 2. **The savings table, pasted into your reply.** Copy the `What we found /
    Saves per month / Who does it` table out of the generated markdown. Copy it;
    do not retype the numbers.
@@ -181,6 +205,24 @@ this — **match it in the chat instead of reverting to shorthand.**
 - Tell them what to do in words they could act on without you. A command they
   can paste, or a sentence they can say to Claude, beats a principle.
 
+## Two headline figures — never one
+
+The report prints them separately and so must you:
+
+- **"Waste we measured"** — always-on overhead nobody uses, removable by a
+  config change. Plain arithmetic, non-overlapping, safe to sum. This is the
+  firm number.
+- **"Changing how you work could save more"** — ranked upper bounds, each
+  labelled *up to*. They overlap each other and the measured set, so they are
+  listed and never totalled.
+
+`Finding.kind` carries this (`"measured"` / `"bound"`), and the JSON handoff
+gives `measured_total_usd` and a `bounds_usd` map so `cost-coach` cannot
+re-add them either.
+
+Saying "you could save $X" with the two added together is the single
+fastest way to lose a reader who checks.
+
 ## Two classes of number — keep them distinct
 
 - **Category A (overhead)** is arithmetic: tokens per turn × turns × rate, priced
@@ -225,6 +267,45 @@ Rules when applying:
 - If the user is on managed/enterprise settings, a write can appear to succeed
   while being overridden. Mention this if a fix seems not to take effect.
 
+## How this differs from `/usage` and `/insights`
+
+Claude Code ships two overlapping features. Know them, cite them, and do not
+pretend this skill is the only option — a reader who knows about them and is
+not told will discount everything else you say.
+
+- **`/usage`** shows the session's cost, usage by model, a `Prompt cache`
+  line with miss counts **and the likely cause of the last miss**, and — on
+  Pro/Max/Team/Enterprise — recent usage attributed to skills, subagents,
+  plugins and individual MCP servers. Computed locally, 24h/7d toggle.
+- **`/insights`** writes an HTML report on how you work: friction points,
+  features to try, suggested CLAUDE.md additions. It is model-generated from
+  your sessions, so it **reads conversation content** and **costs tokens**.
+
+**Where they win, say so.** For the cause of one session's cache miss, send
+the user to `/usage` — it names the culprit and C1 cannot. For working
+habits, `/insights` is richer than anything here.
+
+**Where this skill wins:**
+
+1. **Inventory of what is installed but never used.** `/usage` attributes
+   what *was* used; nothing native says "these six servers and twelve skills
+   load on every message and you have never touched them."
+2. **Configuration audit** — CLAUDE.md length and nesting, `@` imports,
+   `.claude/rules/`, `MEMORY.md` limits, effort, fast mode.
+3. **Machine-wide and cross-project**, not this session.
+4. **It costs nothing to run** and **never reads conversation content**.
+   `/insights` does both the other way round.
+5. **It applies fixes.** The native features report only.
+
+**The principle:** consolidate the measurement, cite the native tool for
+live diagnosis. One report with one total is the deliverable; sending
+someone elsewhere for a row breaks it.
+
+One tension to acknowledge rather than hide: `/insights` suggests *adding*
+to CLAUDE.md while A1–A3 push to shrink it. Both are right — relevance
+versus cost — and the user deserves to hear that rather than get opposite
+advice from two tools.
+
 ## Honest limitations — volunteer these, don't wait to be caught
 
 - **Transcript format is internal** and changes between releases. The script
@@ -236,6 +317,14 @@ Rules when applying:
   finding. Quote it as an estimate and a floor, never as a measurement.
 - **No per-file token readout exists** — before/after is the script's own
   arithmetic, not a reading from Claude Code.
+- **Some servers are invisible to the config scan.** Plugin-bundled servers
+  and claude.ai connectors do not appear in `~/.claude.json`, so `A6` cannot
+  size or switch them off; `A6d` lists them and says so.
+- **A server's instructions block** loads alongside its tool names and is not
+  counted, so `A6` is a floor in one more way.
+- **Thresholds are declared in one place** (`THRESHOLDS`) and labelled `DOC`,
+  `DERIVED` or `ASSUMED`. If a user challenges a number, look there first and
+  tell them plainly which kind it is.
 - Dollar figures are **API-equivalent**. On a subscription they represent the
   value of capacity consumed rather than a bill.
 
